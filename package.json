@@ -1,0 +1,27 @@
+{
+  "name": "autopost-threads-bluesky",
+  "version": "0.1.0",
+  "description": "Threads/Bluesky 予約投稿の GAS バックエンド。snake-sns(Torai) 系フロントエンド + Firebase Functions Proxy から HMAC 署名付きで操作される。x_Autopost の姉妹プロジェクト。",
+  "author": "kztmk",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "bundle": "node esbuild.config.js",
+    "modify": "node modify-codejs.js",
+    "build": "npm run bundle && npm run modify",
+    "copy-dist": "copyfiles -u 1 dist/code.js ./",
+    "cleanup-dist-copy": "del-cli code.js",
+    "push": "npm run copy-dist && clasp push -f && npm run cleanup-dist-copy",
+    "deploy": "npm run build && npm run push"
+  },
+  "devDependencies": {
+    "@types/google-apps-script": "^2.0.11",
+    "copyfiles": "^2.4.1",
+    "del-cli": "^7.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
+  }
+}

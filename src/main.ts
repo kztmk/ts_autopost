@@ -1,6 +1,13 @@
 // NOTE: initializeSheets（sheets.ts）はメニューから文字列名で呼ぶため import しない。
 // import するとバンドル時に名前が衝突し initializeSheets2 にリネームされ、
 // メニューの "initializeSheets" 呼び出しが解決できなくなる。
+import {
+  assertProxyAuthorized,
+  stripAuthField,
+  initializeProxyAuth,
+  getSecurityStatus,
+  generateSetupCode,
+} from "./security";
 
 // ============================================================
 // Web アプリのルーター（doGet / doPost）
@@ -8,14 +15,11 @@
 // リクエストは ?target=<対象>&action=<操作> で分岐する
 // （x_Autopost と同じ target/action 方式）。
 //
-// Phase 0 ではルーティングの骨格のみ。各 target のハンドラは後続 Phase で実装する:
-//   - security        → Phase 1（HMAC Proxy 認証・setup code）
+// security 以外の target のハンドラは後続 Phase で実装する:
 //   - blueskyAuth     → Phase 2
 //   - threadsAuth     → Phase 3
 //   - postData        → Phase 2/4
 //   - trigger         → Phase 2
-//
-// Phase 1 で、下記 SECURITY マーカーの位置に assertProxyAuthorized を挿入する。
 // ============================================================
 
 class NotImplementedError extends Error {
@@ -39,13 +43,61 @@ function jsonError(message: string, code: number = 400): GoogleAppsScript.Conten
 
 /**
  * Spreadsheet を開いたときにメニューを追加する。
- * 本人確認コード生成メニューは Phase 1 で追加する。
  */
 export function onOpen(): void {
   SpreadsheetApp.getUi()
     .createMenu("Autopost 連携")
+    .addItem("本人確認コードを生成", "showSetupCodeDialog")
+    .addSeparator()
     .addItem("シート初期化", "initializeSheets")
     .addToUi();
+}
+
+/**
+ * フロントアプリへ入力する本人確認コードを生成し、コピーしやすいダイアログで表示する。
+ * onOpen のメニューから文字列名で呼ばれる。
+ */
+export function showSetupCodeDialog(): void {
+  const setupCode = generateSetupCode();
+  const html = HtmlService.createHtmlOutput(
+    `
+      <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
+        <h2 style="font-size: 18px; margin: 0 0 12px;">本人確認コード</h2>
+        <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">
+          以下のコードをアプリのプロフィール画面に入力してください。<br>
+          このコードの有効期限は10分です。
+        </p>
+        <input
+          id="setupCode"
+          type="text"
+          readonly
+          value="${setupCode}"
+          style="box-sizing: border-box; width: 100%; padding: 10px; font-size: 16px; font-family: monospace;"
+        />
+        <button
+          onclick="copyCode()"
+          style="margin-top: 12px; padding: 8px 12px; border: 0; border-radius: 4px; background: #1a73e8; color: white; cursor: pointer;"
+        >
+          コピー
+        </button>
+        <span id="copyStatus" style="margin-left: 8px; font-size: 12px; color: #188038;"></span>
+        <script>
+          const input = document.getElementById('setupCode');
+          input.focus();
+          input.select();
+          function copyCode() {
+            input.select();
+            document.execCommand('copy');
+            document.getElementById('copyStatus').textContent = 'コピーしました';
+          }
+        </script>
+      </div>
+    `
+  )
+    .setWidth(460)
+    .setHeight(260);
+
+  SpreadsheetApp.getUi().showModalDialog(html, "本人確認コード");
 }
 
 /**
@@ -67,14 +119,17 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
       throw new Error("Invalid request body format. Expected application/json.");
     }
 
-    // Phase 1: target === "security" && action === "initialize" を
-    //          無認証のまま先に処理する（唯一の無認証 POST）。
+    // security.initialize は唯一の無認証 POST（初回接続時に setup code で紐付け）。
+    if (target === "security" && action === "initialize") {
+      const initialized = initializeProxyAuth(requestData);
+      return jsonSuccess(initialized, 201);
+    }
 
-    // SECURITY(Phase 1): ここに assertProxyAuthorized(e, action, target, requestData, "POST") を挿入し、
-    //                    その後 requestData = stripAuthField(requestData) する。
+    // これ以降はすべて署名検証を要求する。
+    assertProxyAuthorized(e, action, target, requestData, "POST");
+    requestData = stripAuthField(requestData);
 
     switch (target) {
-      case "security":
       case "blueskyAuth":
       case "threadsAuth":
       case "postData":
@@ -85,7 +140,7 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
     }
   } catch (error: any) {
     Logger.log(`doPost error (action=${action}, target=${target}): ${error.message}`);
-    const code = error instanceof NotImplementedError ? 501 : 400;
+    const code = errorStatusCode(error);
     return jsonError(error.message, code);
   }
 }
@@ -98,15 +153,18 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
   const target = e?.parameter?.target || "";
 
   try {
-    // 無認証ルートは設けない。疎通確認は Phase 1 の security.status（無認証 GET）が担う。
+    // security.status は唯一の無認証 GET（疎通確認・初期化状態の確認）。
+    if (target === "security" && action === "status") {
+      return jsonSuccess(getSecurityStatus());
+    }
 
     // Phase 3: Threads OAuth の無認証コールバックルートをここに追加する
     //          （target/action ではなく ?code=... で判定。ADR 0003）。
 
-    // SECURITY(Phase 1): ここに assertProxyAuthorized(e, action, target, {}, "GET") を挿入する。
+    // これ以降はすべて署名検証を要求する。
+    assertProxyAuthorized(e, action, target, {}, "GET");
 
     switch (target) {
-      case "security":
       case "blueskyAuth":
       case "threadsAuth":
       case "postData":
@@ -119,7 +177,15 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
     }
   } catch (error: any) {
     Logger.log(`doGet error (action=${action}, target=${target}): ${error.message}`);
-    const code = error instanceof NotImplementedError ? 501 : 400;
+    const code = errorStatusCode(error);
     return jsonError(error.message, code);
   }
+}
+
+function errorStatusCode(error: any): number {
+  if (error instanceof NotImplementedError) return 501;
+  if (typeof error?.message === "string" && /signature|authoriz|timestamp|Duplicate|owner|登録されており/i.test(error.message)) {
+    return 401;
+  }
+  return 400;
 }

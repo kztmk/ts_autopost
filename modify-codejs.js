@@ -22,17 +22,29 @@ try {
     }
   }
 
-  if (returnLineIndex !== -1) {
-    const removedCount = lines.length - returnLineIndex;
-    lines = lines.slice(0, returnLineIndex);
-    console.log(
-      `${returnLineIndex + 1}行目以降 ${removedCount}行（IIFE の閉じとフッター）を削除しました。`
+  if (returnLineIndex === -1) {
+    // マーカーが見つからないのは esbuild の出力形式が変わった兆候。
+    // 黙って続行すると壊れた code.js を GAS に push してしまうため失敗させる。
+    console.error(
+      "エラー: 'return __toCommonJS(index_exports);' が見つかりません。" +
+        "esbuild の出力形式が変わった可能性があります。dist/code.js を確認してください。"
     );
-  } else {
-    console.log("'return __toCommonJS(index_exports);' が見つかりませんでした。");
+    process.exit(1);
   }
 
+  const removedCount = lines.length - returnLineIndex;
+  lines = lines.slice(0, returnLineIndex);
+  console.log(
+    `${returnLineIndex + 1}行目以降 ${removedCount}行（IIFE の閉じとフッター）を削除しました。`
+  );
+
   // 2 行目（`var MyApp = (() => {`）を削除して IIFE を開く
+  if (!lines[1] || !lines[1].includes("var MyApp")) {
+    console.error(
+      "エラー: 2 行目が 'var MyApp = ...' ではありません。esbuild の出力形式を確認してください。"
+    );
+    process.exit(1);
+  }
   lines.splice(1, 1);
 
   fs.writeFileSync(filePath, lines.join("\n"), "utf8");

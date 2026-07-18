@@ -1,11 +1,13 @@
 import { SHEETS, HEADERS } from "./constants";
 
 /**
- * Posts / Posted / Errors シートを作成し、ヘッダー行を整える。
- * 既存シートは削除せず、ヘッダーが空の場合のみ書き込む（データ保護）。
- * スプレッドシートメニュー「Autopost 連携 → シート初期化」から実行できる。
+ * 指定名のシートを取得し、無ければ作成する。
+ * ヘッダー行が空の場合のみ書き込む（既存データ保護）。
  */
-export function initializeSheets(): { created: string[]; ensured: string[] } {
+export function ensureSheet(
+  name: string,
+  headers: readonly string[]
+): { sheet: GoogleAppsScript.Spreadsheet.Sheet; created: boolean } {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) {
     throw new Error(
@@ -13,6 +15,26 @@ export function initializeSheets(): { created: string[]; ensured: string[] } {
     );
   }
 
+  let sheet = ss.getSheetByName(name);
+  const created = !sheet;
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet
+      .getRange(1, 1, 1, headers.length)
+      .setValues([headers as string[]])
+      .setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+  return { sheet, created };
+}
+
+/**
+ * Posts / Posted / Errors シートを作成し、ヘッダー行を整える。
+ * スプレッドシートメニュー「Autopost 連携 → シート初期化」から実行できる。
+ */
+export function initializeSheets(): { created: string[]; ensured: string[] } {
   const created: string[] = [];
   const ensured: string[] = [];
 
@@ -23,20 +45,8 @@ export function initializeSheets(): { created: string[]; ensured: string[] } {
   ];
 
   specs.forEach((spec) => {
-    let sheet = ss.getSheetByName(spec.name);
-    if (!sheet) {
-      sheet = ss.insertSheet(spec.name);
-      created.push(spec.name);
-    } else {
-      ensured.push(spec.name);
-    }
-    if (sheet.getLastRow() === 0) {
-      sheet
-        .getRange(1, 1, 1, spec.headers.length)
-        .setValues([spec.headers as string[]])
-        .setFontWeight("bold");
-      sheet.setFrozenRows(1);
-    }
+    const result = ensureSheet(spec.name, spec.headers);
+    (result.created ? created : ensured).push(spec.name);
   });
 
   Logger.log(

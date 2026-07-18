@@ -1,4 +1,3 @@
-import { VERSION } from "./constants";
 // NOTE: initializeSheets（sheets.ts）はメニューから文字列名で呼ぶため import しない。
 // import するとバンドル時に名前が衝突し initializeSheets2 にリネームされ、
 // メニューの "initializeSheets" 呼び出しが解決できなくなる。
@@ -99,10 +98,7 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
   const target = e?.parameter?.target || "";
 
   try {
-    // 疎通確認用（無認証）。Phase 1 で security.status を追加する。
-    if (target === "meta" && action === "version") {
-      return jsonSuccess({ name: "autopost-threads-bluesky", version: VERSION });
-    }
+    // 無認証ルートは設けない。疎通確認は Phase 1 の security.status（無認証 GET）が担う。
 
     // Phase 3: Threads OAuth の無認証コールバックルートをここに追加する
     //          （target/action ではなく ?code=... で判定。ADR 0003）。

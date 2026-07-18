@@ -39,7 +39,7 @@ export interface BlueskyAccount extends PlatformAccountBase {
 export type PlatformAccount = ThreadsAccount | BlueskyAccount;
 
 /**
- * Posts シートの 1 行（= 1 配信）。ADR 0002。
+ * Posts シートの 1 行（= 単一の PlatformAccount 宛の 1 Post）。ADR 0002。
  * 列順は constants.ts HEADERS.POST_HEADERS に対応する。
  */
 export interface PostRow {
@@ -54,7 +54,7 @@ export interface PostRow {
   /** 一括作成グループ（クロスポスト） */
   crossPostGroupId: string;
   /** 親 Post の内部 id（スレッド連投。Phase 6 予約） */
-  inReplyToInternal: string;
+  inReplyTo: string;
   status: PostStatus;
   /** 公開後のプラットフォーム投稿 ID */
   postId: string;
@@ -69,11 +69,11 @@ export interface PostInput {
   mediaUrls?: string[];
   postSchedule: string;
   crossPostGroupId?: string;
-  inReplyToInternal?: string;
+  inReplyTo?: string;
 }
 
-/** Errors シートへ記録するエラー情報 */
-export interface PostError {
+/** Errors シートの 1 行（Post に限らない汎用エラーログ） */
+export interface ErrorLogEntry {
   timestamp?: string;
   context?: string;
   message: string;

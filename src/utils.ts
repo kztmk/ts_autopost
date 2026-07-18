@@ -1,20 +1,13 @@
 import { SHEETS, HEADERS } from "./constants";
-import { PostError } from "./types";
+import { ErrorLogEntry } from "./types";
+import { ensureSheet } from "./sheets";
 
 /**
  * Errors シートにエラーを記録する。シートが無ければ作成する。
  */
-export function logErrorToSheet(errorInfo: PostError, context: string): void {
+export function logErrorToSheet(errorInfo: ErrorLogEntry, context: string): void {
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    if (!ss) {
-      Logger.log(`logErrorToSheet skipped (no active spreadsheet): ${errorInfo.message}`);
-      return;
-    }
-    const sheet = ss.getSheetByName(SHEETS.ERRORS) || ss.insertSheet(SHEETS.ERRORS);
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow([...HEADERS.ERROR_HEADERS]);
-    }
+    const { sheet } = ensureSheet(SHEETS.ERRORS, HEADERS.ERROR_HEADERS);
 
     const row = HEADERS.ERROR_HEADERS.map((header) => {
       if (header === "timestamp") {
@@ -69,20 +62,20 @@ function handleRateLimiting(
 ): boolean {
   if (response.getResponseCode() !== 429) return false;
   const headers = response.getHeaders() as { [key: string]: string };
-  const resetTime = parseInt(
-    (headers["x-rate-limit-reset"] || headers["ratelimit-reset"]) as string,
-    10
-  );
-  if (!isNaN(resetTime)) {
-    const waitTime = Math.max(
-      (resetTime - Math.floor(Date.now() / 1000)) * 1000 + 5000,
-      0
-    );
-    Logger.log(`Rate limited. Waiting ${waitTime / 1000}s`);
-    Utilities.sleep(Math.min(waitTime, 60000));
-    return true;
+
+  // Bluesky (AT Protocol) は ratelimit-reset（epoch 秒）、
+  // 汎用には Retry-After（秒）を返すサーバーもある。どちらも無ければ固定待ち。
+  let waitTime = 5000;
+  const resetEpoch = parseInt(headers["ratelimit-reset"] as string, 10);
+  const retryAfter = parseInt(headers["retry-after"] as string, 10);
+  if (!isNaN(resetEpoch)) {
+    waitTime = Math.max((resetEpoch - Math.floor(Date.now() / 1000)) * 1000 + 5000, 0);
+  } else if (!isNaN(retryAfter)) {
+    waitTime = retryAfter * 1000 + 1000;
   }
-  Utilities.sleep(5000);
+
+  Logger.log(`Rate limited. Waiting ${waitTime / 1000}s`);
+  Utilities.sleep(Math.min(waitTime, 60000));
   return true;
 }
 

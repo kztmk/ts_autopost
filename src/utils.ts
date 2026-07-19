@@ -92,6 +92,13 @@ export function newId(): string {
   return Utilities.getUuid();
 }
 
+/** 必須文字列を検証・正規化する。空なら例外（field 名をメッセージに含む） */
+export function requireNonEmptyString(value: any, field: string): string {
+  const s = value === null || value === undefined ? "" : String(value).trim();
+  if (!s) throw new Error(`Missing required field: ${field}.`);
+  return s;
+}
+
 /** JSON を安全にパースする。失敗時は fallback を返す */
 export function safeJsonParse<T>(text: string | null | undefined, fallback: T): T {
   if (!text) return fallback;

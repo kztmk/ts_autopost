@@ -4,19 +4,13 @@
 // （development-plan.md Phase 2 / トークン更新方針）。
 
 import { BlueskyAccount } from "../types";
-import { maskSensitive } from "../utils";
+import { maskSensitive, fetchWithRetries, requireNonEmptyString } from "../utils";
 
 const BSKY_SERVICE = "https://bsky.social";
 const BSKY_ACCOUNT_PREFIX = "BLUESKY_ACCOUNT_";
 
 function accountKey(accountId: string): string {
   return BSKY_ACCOUNT_PREFIX + accountId;
-}
-
-function normalizeId(value: any, field: string): string {
-  const s = value === null || value === undefined ? "" : String(value).trim();
-  if (!s) throw new Error(`Missing required field: ${field}.`);
-  return s;
 }
 
 /** 保存済みの Bluesky アカウントを読み込む。無ければ例外 */
@@ -53,7 +47,7 @@ function maskAccount(account: BlueskyAccount) {
 
 /** createSession（ログイン）。did / accessJwt / refreshJwt を取得して保存する */
 export function blueskyLogin(account: BlueskyAccount): BlueskyAccount {
-  const res = UrlFetchApp.fetch(`${BSKY_SERVICE}/xrpc/com.atproto.server.createSession`, {
+  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.server.createSession`, {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify({ identifier: account.handle, password: account.appPassword }),
@@ -75,7 +69,7 @@ function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
   if (!account.refreshJwt) {
     throw new Error("No refreshJwt to refresh.");
   }
-  const res = UrlFetchApp.fetch(`${BSKY_SERVICE}/xrpc/com.atproto.server.refreshSession`, {
+  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.server.refreshSession`, {
     method: "post",
     headers: { Authorization: "Bearer " + account.refreshJwt },
     muteHttpExceptions: true,
@@ -92,6 +86,19 @@ function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
 
 // ---- 投稿 ----
 
+/** レスポンスがトークン失効によるものか判定する（401、または 400 + ExpiredToken/InvalidToken） */
+function isExpiredAuthResponse(res: GoogleAppsScript.URL_Fetch.HTTPResponse): boolean {
+  const code = res.getResponseCode();
+  if (code === 401) return true;
+  if (code !== 400) return false;
+  try {
+    const body = JSON.parse(res.getContentText());
+    return body.error === "ExpiredToken" || body.error === "InvalidToken";
+  } catch (e) {
+    return false;
+  }
+}
+
 /** createRecord を 1 回叩く（HTTPResponse をそのまま返し、呼び出し側で失効判定する） */
 function createRecordRequest(
   account: BlueskyAccount,
@@ -106,7 +113,7 @@ function createRecordRequest(
       createdAt: new Date().toISOString(),
     },
   };
-  return UrlFetchApp.fetch(`${BSKY_SERVICE}/xrpc/com.atproto.repo.createRecord`, {
+  return fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.repo.createRecord`, {
     method: "post",
     contentType: "application/json",
     headers: { Authorization: "Bearer " + account.accessJwt },
@@ -126,10 +133,11 @@ export function postToBluesky(accountId: string, text: string): string {
   }
 
   let res = createRecordRequest(account, text);
-  const code = res.getResponseCode();
 
-  // accessJwt 失効（401/400）→ refresh、だめなら再ログインして 1 回だけ再試行
-  if (code === 401 || code === 400) {
+  // accessJwt 失効 → refresh、だめなら再ログインして 1 回だけ再試行。
+  // 400 は文字数超過などの正規エラーでも返るため、本文の error 種別で失効時のみ回復する
+  // （そうしないと正規の 400 で refresh + 再ログイン + 再送を浪費する）。
+  if (isExpiredAuthResponse(res)) {
     try {
       account = blueskyRefresh(account);
     } catch (e) {
@@ -149,9 +157,9 @@ export function postToBluesky(accountId: string, text: string): string {
 
 /** アカウントを新規登録する。認証情報を検証するため即ログインし did/JWT を保存する */
 export function createBlueskyAuth(data: any) {
-  const accountId = normalizeId(data?.accountId, "accountId");
-  const handle = normalizeId(data?.handle, "handle");
-  const appPassword = normalizeId(data?.appPassword, "appPassword");
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  const handle = requireNonEmptyString(data?.handle, "handle");
+  const appPassword = requireNonEmptyString(data?.appPassword, "appPassword");
 
   if (PropertiesService.getScriptProperties().getProperty(accountKey(accountId))) {
     throw new Error(`Bluesky account already exists: ${accountId}`);
@@ -180,7 +188,7 @@ export function getBlueskyAuthAll() {
 
 /** アカウントを更新する（handle / appPassword / displayName）。認証情報変更時は再ログイン */
 export function updateBlueskyAuth(data: any) {
-  const accountId = normalizeId(data?.accountId, "accountId");
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
   const account = loadBlueskyAccount(accountId);
 
   let credsChanged = false;
@@ -205,7 +213,7 @@ export function updateBlueskyAuth(data: any) {
 
 /** アカウントを削除する */
 export function deleteBlueskyAuth(data: any) {
-  const accountId = normalizeId(data?.accountId, "accountId");
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
   PropertiesService.getScriptProperties().deleteProperty(accountKey(accountId));
   return { accountId, deleted: true };
 }

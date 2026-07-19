@@ -28,23 +28,22 @@ import {
   checkTriggerExists,
   POSTING_HANDLER,
 } from "./api/triggers";
+import {
+  createThreadsAuth,
+  getThreadsAuthAll,
+  updateThreadsAuth,
+  deleteThreadsAuth,
+  getThreadsAuthorizeUrl,
+  isThreadsOAuthCallback,
+  handleThreadsOAuthCallback,
+} from "./api/threadsAuth";
 
 // ============================================================
 // Web アプリのルーター（doGet / doPost）
 //
 // リクエストは ?target=<対象>&action=<操作> で分岐する
 // （x_Autopost と同じ target/action 方式）。
-//
-// 未実装の target は後続 Phase で実装する:
-//   - threadsAuth     → Phase 3
 // ============================================================
-
-class NotImplementedError extends Error {
-  constructor(target: string, action: string) {
-    super(`Not implemented yet: target='${target}', action='${action}'`);
-    this.name = "NotImplementedError";
-  }
-}
 
 function jsonSuccess(data: any, code: number = 200): GoogleAppsScript.Content.TextOutput {
   return ContentService.createTextOutput(
@@ -201,21 +200,33 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
         }
       case "threadsAuth":
-        throw new NotImplementedError(target, action);
+        switch (action) {
+          case "create":
+            return jsonSuccess(createThreadsAuth(requestData), 201);
+          case "update":
+            return jsonSuccess(updateThreadsAuth(requestData));
+          case "delete":
+            return jsonSuccess(deleteThreadsAuth(requestData));
+          case "authorizeUrl":
+            return jsonSuccess(getThreadsAuthorizeUrl(requestData));
+          default:
+            return jsonError(`Invalid action '${action}' for target 'threadsAuth'`, 400);
+        }
       default:
         return jsonError(`Invalid target '${target}'`, 400);
     }
   } catch (error: any) {
     Logger.log(`doPost error (action=${action}, target=${target}): ${error.message}`);
-    const code = error instanceof NotImplementedError ? 501 : 400;
-    return jsonError(error.message, code);
+    return jsonError(error.message, 400);
   }
 }
 
 /**
  * GET リクエストの処理。
  */
-export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
+export function doGet(
+  e: any
+): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
   const action = e?.parameter?.action || "";
   const target = e?.parameter?.target || "";
 
@@ -225,8 +236,12 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
       return jsonSuccess(getSecurityStatus());
     }
 
-    // Phase 3: Threads OAuth の無認証コールバックルートをここに追加する
-    //          （target/action ではなく ?code=... で判定。ADR 0003）。
+    // Threads OAuth の無認証コールバックルート（ADR 0003）。
+    // Meta からのリダイレクトは target を持たず ?state=...&code=...（または error）で届く。
+    // CSRF/紐付け検証は handleThreadsOAuthCallback 内の state 検証が担う。
+    if (isThreadsOAuthCallback(e)) {
+      return handleThreadsOAuthCallback(e);
+    }
 
     // これ以降はすべて署名検証を要求する。認証失敗は 401 に確定させる。
     try {
@@ -253,13 +268,13 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
         if (action === "status") return jsonSuccess(checkTriggerExists(e?.parameter?.functionName || POSTING_HANDLER));
         return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
       case "threadsAuth":
-        throw new NotImplementedError(target, action);
+        if (action === "fetch") return jsonSuccess(getThreadsAuthAll());
+        return jsonError(`Invalid action '${action}' for target 'threadsAuth'`, 400);
       default:
         return jsonError(`Invalid target '${target}' in GET request`, 400);
     }
   } catch (error: any) {
     Logger.log(`doGet error (action=${action}, target=${target}): ${error.message}`);
-    const code = error instanceof NotImplementedError ? 501 : 400;
-    return jsonError(error.message, code);
+    return jsonError(error.message, 400);
   }
 }

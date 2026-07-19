@@ -1,0 +1,328 @@
+// Threads（Meta Graph API）の PlatformAccount 管理と OAuth。
+// ADR 0003: BYO Meta アプリ方式。ユーザーが自分の Meta アプリの App ID/Secret を登録し、
+// 認可リダイレクトは本人の GAS doGet 上の無認証コールバックルートで受ける。
+// state パラメータ（CacheService に 10 分保持する nonce）で PlatformAccount 紐付けと
+// CSRF 検証を行う。スコープには最初から threads_manage_insights を含める（ADR 0003 帰結）。
+//
+// トークン: 認可コード → 短期トークン → 長期トークン（60 日）。
+// 延命は日次メンテナンストリガー（threadsTokenMaintenance）が、発行から
+// REFRESH_AFTER_DAYS 経過したトークンのみ th_refresh_token でリフレッシュする。
+
+import { ThreadsAccount } from "../types";
+import {
+  maskSensitive,
+  fetchWithRetries,
+  requireNonEmptyString,
+  logErrorToSheet,
+  newId,
+} from "../utils";
+
+const THREADS_GRAPH = "https://graph.threads.net";
+const THREADS_AUTHORIZE_URL = "https://threads.net/oauth/authorize";
+const THREADS_SCOPES = "threads_basic,threads_content_publish,threads_manage_insights";
+const THREADS_ACCOUNT_PREFIX = "THREADS_ACCOUNT_";
+const OAUTH_STATE_CACHE_PREFIX = "threads_oauth_state_";
+const OAUTH_STATE_TTL_SECONDS = 10 * 60;
+/** 発行からこの日数を超えた長期トークンを日次メンテナンスでリフレッシュする */
+const REFRESH_AFTER_DAYS = 30;
+
+function threadsAccountKey(accountId: string): string {
+  return THREADS_ACCOUNT_PREFIX + accountId;
+}
+
+/** 保存済みの Threads アカウントを読み込む。無ければ例外 */
+function loadThreadsAccount(accountId: string): ThreadsAccount {
+  const raw = PropertiesService.getScriptProperties().getProperty(threadsAccountKey(accountId));
+  if (!raw) {
+    throw new Error(`Threads account not found: ${accountId}`);
+  }
+  return JSON.parse(raw) as ThreadsAccount;
+}
+
+/** Threads アカウントを保存する（トークン込み） */
+function saveThreadsAccount(account: ThreadsAccount): void {
+  PropertiesService.getScriptProperties().setProperty(
+    threadsAccountKey(account.accountId),
+    JSON.stringify(account)
+  );
+}
+
+/** API 応答から機密を除いた表示用アカウント */
+function maskThreadsAccount(account: ThreadsAccount) {
+  return {
+    accountId: account.accountId,
+    platform: "threads" as const,
+    displayName: account.displayName || "",
+    appId: account.appId,
+    appSecret: maskSensitive(account.appSecret),
+    userId: account.userId || "",
+    authorized: Boolean(account.accessToken),
+    tokenSavedAt: account.tokenSavedAt || "",
+  };
+}
+
+// ---- アカウント CRUD（ルーターから呼ばれる）----
+
+/** アカウントを新規登録する（App ID/Secret のみ。トークンは認可フロー完了時に保存） */
+export function createThreadsAuth(data: any) {
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  const appId = requireNonEmptyString(data?.appId, "appId");
+  const appSecret = requireNonEmptyString(data?.appSecret, "appSecret");
+
+  if (PropertiesService.getScriptProperties().getProperty(threadsAccountKey(accountId))) {
+    throw new Error(`Threads account already exists: ${accountId}`);
+  }
+
+  const account: ThreadsAccount = {
+    accountId,
+    platform: "threads",
+    displayName: data?.displayName ? String(data.displayName) : "",
+    appId,
+    appSecret,
+  };
+  saveThreadsAccount(account);
+  return maskThreadsAccount(account);
+}
+
+/** 全 Threads アカウントを返す（機密はマスク） */
+export function getThreadsAuthAll() {
+  const all = PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(all)
+    .filter((k) => k.indexOf(THREADS_ACCOUNT_PREFIX) === 0)
+    .map((k) => maskThreadsAccount(JSON.parse(all[k]) as ThreadsAccount));
+}
+
+/** アカウントを更新する。appId/appSecret 変更時は既存トークンを無効化（要・再認可） */
+export function updateThreadsAuth(data: any) {
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  const account = loadThreadsAccount(accountId);
+
+  let credsChanged = false;
+  if (data?.appId && String(data.appId).trim() !== account.appId) {
+    account.appId = String(data.appId).trim();
+    credsChanged = true;
+  }
+  if (data?.appSecret && String(data.appSecret).trim() !== account.appSecret) {
+    account.appSecret = String(data.appSecret).trim();
+    credsChanged = true;
+  }
+  if (data?.displayName !== undefined) {
+    account.displayName = String(data.displayName);
+  }
+
+  if (credsChanged) {
+    // 旧アプリのトークンは新しい App ID/Secret では更新できないため破棄する
+    delete account.accessToken;
+    delete account.userId;
+    delete account.tokenSavedAt;
+  }
+  saveThreadsAccount(account);
+  return maskThreadsAccount(account);
+}
+
+/** アカウントを削除する */
+export function deleteThreadsAuth(data: any) {
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  PropertiesService.getScriptProperties().deleteProperty(threadsAccountKey(accountId));
+  return { accountId, deleted: true };
+}
+
+// ---- 認可フロー ----
+
+/** この Web アプリ自身の /exec URL（= Meta に登録するリダイレクト URI） */
+function getRedirectUri(): string {
+  const url = ScriptApp.getService().getUrl();
+  if (!url) {
+    throw new Error("Web アプリの URL を取得できません。デプロイ済みか確認してください。");
+  }
+  return url;
+}
+
+/**
+ * 認可 URL を生成する（フロントはこれをユーザーに開かせる）。
+ * state には nonce のみを載せ、accountId と redirectUri は CacheService 側に保持する
+ * （リダイレクトで返る state の改竄が意味を持たないように）。
+ */
+export function getThreadsAuthorizeUrl(data: any) {
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  const account = loadThreadsAccount(accountId);
+  const redirectUri = getRedirectUri();
+
+  const nonce = newId().replace(/-/g, "");
+  CacheService.getScriptCache().put(
+    OAUTH_STATE_CACHE_PREFIX + nonce,
+    JSON.stringify({ accountId, redirectUri }),
+    OAUTH_STATE_TTL_SECONDS
+  );
+
+  const authorizeUrl =
+    THREADS_AUTHORIZE_URL +
+    `?client_id=${encodeURIComponent(account.appId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${encodeURIComponent(THREADS_SCOPES)}` +
+    `&response_type=code` +
+    `&state=${encodeURIComponent(nonce)}`;
+
+  return {
+    accountId,
+    authorizeUrl,
+    redirectUri, // Meta アプリの「有効な OAuth リダイレクト URI」にこの値を登録する
+    expiresInSeconds: OAUTH_STATE_TTL_SECONDS,
+  };
+}
+
+/** doGet が Threads OAuth コールバックとして扱うべきリクエストか判定する */
+export function isThreadsOAuthCallback(e: any): boolean {
+  const p = e?.parameter || {};
+  return !p.target && Boolean(p.state) && Boolean(p.code || p.error);
+}
+
+function callbackHtml(title: string, bodyHtml: string): GoogleAppsScript.HTML.HtmlOutput {
+  return HtmlService.createHtmlOutput(
+    `<div style="font-family: Arial, sans-serif; padding: 24px; color: #202124; max-width: 560px;">
+      <h2 style="font-size: 20px; margin: 0 0 12px;">${title}</h2>
+      <div style="font-size: 14px; line-height: 1.8;">${bodyHtml}</div>
+    </div>`
+  );
+}
+
+/**
+ * Threads 認可リダイレクトの無認証コールバックルート（CONTEXT.md「OAuth コールバックルート」）。
+ * state 検証 → 認可コード → 短期トークン → 長期トークン交換 → アカウントへ保存、まで自動で行う。
+ */
+export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOutput {
+  const p = e?.parameter || {};
+
+  // CSRF / 紐付け検証（state は一回限り・10 分で失効）
+  const cache = CacheService.getScriptCache();
+  const cacheKey = OAUTH_STATE_CACHE_PREFIX + String(p.state || "");
+  const stateJson = cache.get(cacheKey);
+  cache.remove(cacheKey);
+  if (!stateJson) {
+    return callbackHtml(
+      "認可を受け付けられませんでした",
+      "認可リクエストの有効期限（10分）が切れたか、不正なリクエストです。<br>アプリから認可 URL を再発行してやり直してください。"
+    );
+  }
+  const { accountId, redirectUri } = JSON.parse(stateJson);
+
+  if (p.error) {
+    return callbackHtml(
+      "認可がキャンセルされました",
+      `Threads 側で認可が完了しませんでした。<br>理由: ${String(p.error_description || p.error)}`
+    );
+  }
+
+  try {
+    const account = loadThreadsAccount(accountId);
+
+    // ① 認可コード → 短期アクセストークン
+    const shortRes = fetchWithRetries(`${THREADS_GRAPH}/oauth/access_token`, {
+      method: "post",
+      payload: {
+        client_id: account.appId,
+        client_secret: account.appSecret,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+        code: String(p.code),
+      },
+      muteHttpExceptions: true,
+    });
+    const shortData = JSON.parse(shortRes.getContentText());
+    if (!shortData.access_token) {
+      throw new Error(`短期トークン取得に失敗: ${JSON.stringify(shortData)}`);
+    }
+
+    // ② 短期 → 長期アクセストークン（60 日）
+    const longUrl =
+      `${THREADS_GRAPH}/access_token` +
+      `?grant_type=th_exchange_token` +
+      `&client_secret=${encodeURIComponent(account.appSecret)}` +
+      `&access_token=${encodeURIComponent(shortData.access_token)}`;
+    const longRes = fetchWithRetries(longUrl, { muteHttpExceptions: true });
+    const longData = JSON.parse(longRes.getContentText());
+    if (!longData.access_token) {
+      throw new Error(`長期トークン取得に失敗: ${JSON.stringify(longData)}`);
+    }
+
+    // ③ 保存 + トークン延命トリガーの確保
+    account.userId = String(shortData.user_id);
+    account.accessToken = longData.access_token;
+    account.tokenSavedAt = new Date().toISOString();
+    saveThreadsAccount(account);
+    ensureThreadsMaintenanceTrigger();
+
+    return callbackHtml(
+      "✅ 認証に成功しました",
+      `アカウント「${accountId}」の長期アクセストークンを保存しました。<br>このタブは閉じて構いません。`
+    );
+  } catch (err: any) {
+    logErrorToSheet(
+      { message: err.message, stack: err.stack, detail: `accountId=${accountId}` },
+      "threadsOAuthCallback"
+    );
+    return callbackHtml(
+      "エラーが発生しました",
+      `トークン交換中にエラーが発生しました。<br><pre style="white-space: pre-wrap;">${err.message}</pre>` +
+        "アプリから認可 URL を再発行してやり直してください。"
+    );
+  }
+}
+
+// ---- 長期トークンの延命（日次メンテナンス）----
+
+export const THREADS_MAINTENANCE_HANDLER = "threadsTokenMaintenance";
+
+/** 日次メンテナンストリガーが無ければ作成する（認可完了時に自動確保） */
+export function ensureThreadsMaintenanceTrigger(): void {
+  const exists = ScriptApp.getProjectTriggers().some(
+    (t) => t.getHandlerFunction() === THREADS_MAINTENANCE_HANDLER
+  );
+  if (exists) return;
+  ScriptApp.newTrigger(THREADS_MAINTENANCE_HANDLER).timeBased().everyDays(1).create();
+  Logger.log("Threads token maintenance trigger created (daily).");
+}
+
+/**
+ * 【トリガーハンドラ】全 Threads アカウントを走査し、発行から REFRESH_AFTER_DAYS を
+ * 超えた長期トークンをリフレッシュする。失敗はアカウント単位で Errors に記録して続行。
+ */
+export function threadsTokenMaintenance(): void {
+  const all = PropertiesService.getScriptProperties().getProperties();
+  const accountKeys = Object.keys(all).filter(
+    (k) => k.indexOf(THREADS_ACCOUNT_PREFIX) === 0
+  );
+
+  accountKeys.forEach((key) => {
+    const account = JSON.parse(all[key]) as ThreadsAccount;
+    if (!account.accessToken || !account.tokenSavedAt) return; // 未認可はスキップ
+
+    const ageMs = Date.now() - new Date(account.tokenSavedAt).getTime();
+    if (ageMs < REFRESH_AFTER_DAYS * 24 * 60 * 60 * 1000) return; // まだ新しい
+
+    try {
+      const url =
+        `${THREADS_GRAPH}/refresh_access_token` +
+        `?grant_type=th_refresh_token` +
+        `&access_token=${encodeURIComponent(account.accessToken)}`;
+      const res = fetchWithRetries(url, { muteHttpExceptions: true });
+      const data = JSON.parse(res.getContentText());
+      if (!data.access_token) {
+        throw new Error(`トークン更新に失敗: ${JSON.stringify(data)}`);
+      }
+      account.accessToken = data.access_token;
+      account.tokenSavedAt = new Date().toISOString();
+      saveThreadsAccount(account);
+      Logger.log(
+        `Threads token refreshed for ${account.accountId} (expires_in ~${Math.floor(
+          (data.expires_in || 0) / 86400
+        )}d).`
+      );
+    } catch (err: any) {
+      logErrorToSheet(
+        { message: err.message, stack: err.stack, detail: `accountId=${account.accountId}` },
+        "threadsTokenMaintenance"
+      );
+    }
+  });
+}

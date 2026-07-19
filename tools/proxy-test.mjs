@@ -11,8 +11,12 @@
 //        GAS_URL=<url> node tools/proxy-test.mjs status
 //   3) 署名付き GET（認証ゲート通過を確認。target は未実装なので 501 が正常）:
 //        GAS_URL=<url> node tools/proxy-test.mjs signed-get <uid> <proxySecret> [target]
-//   4) 署名付き POST（同上）:
-//        GAS_URL=<url> node tools/proxy-test.mjs signed-post <uid> <proxySecret> [target] [action]
+//   4) 署名付き POST（body に JSON を渡せる。target/action/body を指定）:
+//        GAS_URL=<url> node tools/proxy-test.mjs signed-post <uid> <proxySecret> [target] [action] [bodyJson]
+//      例) Bluesky アカウント登録:
+//        ... signed-post <uid> <secret> blueskyAuth create '{"accountId":"main","handle":"you.bsky.social","appPassword":"xxxx-xxxx-xxxx-xxxx"}'
+//      例) 予約投稿の作成:
+//        ... signed-post <uid> <secret> postData create '{"platform":"bluesky","accountId":"main","contents":"テスト投稿"}'
 //   5) 改竄署名（401 Invalid request signature が正常）:
 //        GAS_URL=<url> node tools/proxy-test.mjs bad-sig <uid> <proxySecret>
 //   6) 無署名（認証情報を一切付けず保護ルートを叩く。401 が正常）:
@@ -165,8 +169,14 @@ async function cmdSignedGet(uid, secret, target = "postData") {
   await printResponse(res);
 }
 
-async function cmdSignedPost(uid, secret, target = "postData", action = "create") {
-  const body = {}; // Phase 1 では空ボディで十分（署名検証のみ確認）
+async function cmdSignedPost(uid, secret, target = "postData", action = "create", bodyJson = "{}") {
+  let body;
+  try {
+    body = JSON.parse(bodyJson);
+  } catch {
+    console.error("body は JSON 文字列で渡してください。例: '{\"platform\":\"bluesky\"}'");
+    process.exit(1);
+  }
   const bodyForSignature = stripAuthField(body);
   const auth = createProxyAuthPayload(secret, uid, action, target, bodyForSignature);
 
@@ -202,7 +212,7 @@ const run = {
   init: () => cmdInit(args[0], args[1]),
   status: () => cmdStatus(),
   "signed-get": () => cmdSignedGet(args[0], args[1], args[2]),
-  "signed-post": () => cmdSignedPost(args[0], args[1], args[2], args[3]),
+  "signed-post": () => cmdSignedPost(args[0], args[1], args[2], args[3], args[4]),
   "bad-sig": () => cmdBadSig(args[0], args[1]),
   "no-auth": () => cmdNoAuth(args[0]),
 };

@@ -8,6 +8,26 @@ import {
   getSecurityStatus,
   generateSetupCode,
 } from "./security";
+import {
+  createBlueskyAuth,
+  getBlueskyAuthAll,
+  updateBlueskyAuth,
+  deleteBlueskyAuth,
+} from "./api/blueskyAuth";
+import {
+  createPost,
+  createMultiplePosts,
+  deletePost,
+  fetchPosts,
+  fetchPostedData,
+  fetchErrorData,
+} from "./api/postData";
+import {
+  createPostingTrigger,
+  deletePostingTriggers,
+  checkTriggerExists,
+  POSTING_HANDLER,
+} from "./api/triggers";
 
 // ============================================================
 // Web アプリのルーター（doGet / doPost）
@@ -15,11 +35,8 @@ import {
 // リクエストは ?target=<対象>&action=<操作> で分岐する
 // （x_Autopost と同じ target/action 方式）。
 //
-// security 以外の target のハンドラは後続 Phase で実装する:
-//   - blueskyAuth     → Phase 2
+// 未実装の target は後続 Phase で実装する:
 //   - threadsAuth     → Phase 3
-//   - postData        → Phase 2/4
-//   - trigger         → Phase 2
 // ============================================================
 
 class NotImplementedError extends Error {
@@ -153,9 +170,37 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
 
     switch (target) {
       case "blueskyAuth":
-      case "threadsAuth":
+        switch (action) {
+          case "create":
+            return jsonSuccess(createBlueskyAuth(requestData), 201);
+          case "update":
+            return jsonSuccess(updateBlueskyAuth(requestData));
+          case "delete":
+            return jsonSuccess(deleteBlueskyAuth(requestData));
+          default:
+            return jsonError(`Invalid action '${action}' for target 'blueskyAuth'`, 400);
+        }
       case "postData":
+        switch (action) {
+          case "create":
+            return jsonSuccess(createPost(requestData), 201);
+          case "createMultiple":
+            return jsonSuccess(createMultiplePosts(requestData.posts || requestData), 201);
+          case "delete":
+            return jsonSuccess(deletePost(requestData));
+          default:
+            return jsonError(`Invalid action '${action}' for target 'postData'`, 400);
+        }
       case "trigger":
+        switch (action) {
+          case "create":
+            return jsonSuccess(createPostingTrigger(requestData), 201);
+          case "delete":
+            return jsonSuccess(deletePostingTriggers());
+          default:
+            return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
+        }
+      case "threadsAuth":
         throw new NotImplementedError(target, action);
       default:
         return jsonError(`Invalid target '${target}'`, 400);
@@ -193,11 +238,21 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
 
     switch (target) {
       case "blueskyAuth":
-      case "threadsAuth":
+        if (action === "fetch") return jsonSuccess(getBlueskyAuthAll());
+        return jsonError(`Invalid action '${action}' for target 'blueskyAuth'`, 400);
       case "postData":
+        if (action === "fetch") return jsonSuccess(fetchPosts());
+        return jsonError(`Invalid action '${action}' for target 'postData'`, 400);
       case "postedData":
+        if (action === "fetch") return jsonSuccess(fetchPostedData());
+        return jsonError(`Invalid action '${action}' for target 'postedData'`, 400);
       case "errorData":
+        if (action === "fetch") return jsonSuccess(fetchErrorData());
+        return jsonError(`Invalid action '${action}' for target 'errorData'`, 400);
       case "trigger":
+        if (action === "status") return jsonSuccess(checkTriggerExists(e?.parameter?.functionName || POSTING_HANDLER));
+        return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
+      case "threadsAuth":
         throw new NotImplementedError(target, action);
       default:
         return jsonError(`Invalid target '${target}' in GET request`, 400);

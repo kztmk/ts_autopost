@@ -11,7 +11,7 @@ import {
 import { postToBluesky } from "./api/blueskyAuth";
 import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
-import { logErrorToSheet } from "./utils";
+import { logErrorToSheet, safeJsonParse } from "./utils";
 import { PostRow, Platform } from "./types";
 
 const MAX_POSTS_PER_RUN = 20;
@@ -36,8 +36,9 @@ function isQueued(row: PostRow): boolean {
 
 /** Post を該当 Platform へ投稿し、公開後の投稿 ID を返す */
 function publishPost(post: PostRow): string {
-  if (post.platform === "bluesky") return postToBluesky(post.accountId, post.contents);
-  if (post.platform === "threads") return postToThreads(post.accountId, post.contents);
+  const mediaUrls = safeJsonParse<string[]>(post.mediaUrls, []);
+  if (post.platform === "bluesky") return postToBluesky(post.accountId, post.contents, mediaUrls);
+  if (post.platform === "threads") return postToThreads(post.accountId, post.contents, mediaUrls);
   throw new Error(`Unsupported platform: ${post.platform}`);
 }
 

@@ -203,21 +203,31 @@ function callbackHtml(title: string, bodyHtml: string): GoogleAppsScript.HTML.Ht
 }
 
 /**
- * トークン系エンドポイントを叩き、access_token を含む JSON を返す。
- * 失敗時はレスポンス全文を含む Error を投げる（呼び出し側で Errors シートに記録し、
+ * Threads API を叩き、requiredField を含む JSON を返す。
+ * 欠けていればレスポンス全文を含む Error を投げる（呼び出し側で Errors シートに記録し、
  * 無認証ページには出さないこと）。
  */
+function fetchThreadsJson(
+  label: string,
+  url: string,
+  options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions,
+  requiredField: string
+): any {
+  const res = fetchWithRetries(url, { ...options, muteHttpExceptions: true });
+  const data = JSON.parse(res.getContentText());
+  if (!data[requiredField]) {
+    throw new Error(`${label}に失敗: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+/** トークン系エンドポイント用（access_token 必須） */
 function fetchThreadsToken(
   label: string,
   url: string,
   options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions
 ): any {
-  const res = fetchWithRetries(url, { ...options, muteHttpExceptions: true });
-  const data = JSON.parse(res.getContentText());
-  if (!data.access_token) {
-    throw new Error(`${label}に失敗: ${JSON.stringify(data)}`);
-  }
-  return data;
+  return fetchThreadsJson(label, url, options, "access_token");
 }
 
 /**
@@ -382,23 +392,41 @@ export function threadsTokenMaintenance(): void {
 
 const CONTAINER_POLL_ATTEMPTS = 6;
 const CONTAINER_POLL_INTERVAL_MS = 2000;
+/** クォータの既定値（API が config を返さなかった場合の Threads 既定） */
+const THREADS_DEFAULT_QUOTA_TOTAL = 250;
+const THREADS_DEFAULT_QUOTA_DURATION_SECONDS = 86400;
 
 // ユーザースコープのエンドポイントはトークン所有者エイリアス "me" を使う。
 // OAuth の user_id をパスに使うと code 100/subcode 33（object does not exist）になるため、
 // トークンから解決される "me" を使ってアカウント ID 不一致を避ける。
 const THREADS_ME = "me";
 
-/** メディアコンテナを作成し、creation_id を返す */
-function createThreadsContainer(account: ThreadsAccount, text: string): string {
-  const res = fetchWithRetries(`${THREADS_GRAPH_V1}/${THREADS_ME}/threads`, {
-    method: "post",
-    payload: { media_type: "TEXT", text, access_token: account.accessToken },
-    muteHttpExceptions: true,
-  });
-  const data = JSON.parse(res.getContentText());
-  if (!data.id) {
-    throw new Error(`Threads コンテナ作成に失敗: ${JSON.stringify(data)}`);
+/** 認可済み（accessToken / userId あり）が保証された Threads アカウント */
+type AuthorizedThreadsAccount = ThreadsAccount & {
+  accessToken: string;
+  userId: string;
+};
+
+/** 認可済みアカウントを読み込む。未認可なら例外 */
+function loadAuthorizedThreadsAccount(accountId: string): AuthorizedThreadsAccount {
+  const account = loadThreadsAccount(accountId);
+  if (!account.accessToken || !account.userId) {
+    throw new Error(`Threads account not authorized: ${accountId}. 再認可が必要です。`);
   }
+  return account as AuthorizedThreadsAccount;
+}
+
+/** メディアコンテナを作成し、creation_id を返す */
+function createThreadsContainer(account: AuthorizedThreadsAccount, text: string): string {
+  const data = fetchThreadsJson(
+    "Threads コンテナ作成",
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
+    {
+      method: "post",
+      payload: { media_type: "TEXT", text, access_token: account.accessToken },
+    },
+    "id"
+  );
   return data.id;
 }
 
@@ -406,40 +434,52 @@ function createThreadsContainer(account: ThreadsAccount, text: string): string {
  * コンテナが公開可能（FINISHED）になるまでポーリングする（固定 sleep ではない）。
  * TEXT は通常即 FINISHED だが、稀に処理中のことがあるため状態を確認してから公開する。
  */
-function waitForContainerFinished(account: ThreadsAccount, creationId: string): void {
+function waitForContainerFinished(
+  account: AuthorizedThreadsAccount,
+  creationId: string
+): void {
   for (let i = 0; i < CONTAINER_POLL_ATTEMPTS; i++) {
     const res = fetchWithRetries(
       `${THREADS_GRAPH_V1}/${creationId}?fields=status,error_message` +
-        `&access_token=${encodeURIComponent(account.accessToken as string)}`,
+        `&access_token=${encodeURIComponent(account.accessToken)}`,
       { muteHttpExceptions: true }
     );
     const data = JSON.parse(res.getContentText());
     const status = String(data.status || "");
-    if (status === "FINISHED") return;
+    if (status === "FINISHED" || status === "PUBLISHED") return;
     if (status === "ERROR" || status === "EXPIRED") {
       throw new Error(
         `Threads コンテナが ${status}: ${data.error_message || JSON.stringify(data)}`
       );
     }
-    // IN_PROGRESS 等は待って再確認
+    if (status !== "IN_PROGRESS") {
+      // status 欠落や未知値はエラー応答とみなし、空ポーリングで原因を握り潰さず即失敗させる
+      // （タイムアウトの汎用メッセージではなく実レスポンスを Errors に残す）。
+      throw new Error(`Threads コンテナ状態が不明: ${JSON.stringify(data)}`);
+    }
     if (i < CONTAINER_POLL_ATTEMPTS - 1) {
       Utilities.sleep(CONTAINER_POLL_INTERVAL_MS);
     }
   }
-  throw new Error("Threads コンテナが所定時間内に FINISHED になりませんでした。");
+  throw new Error(
+    `Threads コンテナが ${(CONTAINER_POLL_ATTEMPTS * CONTAINER_POLL_INTERVAL_MS) / 1000}秒以内に FINISHED になりませんでした。`
+  );
 }
 
 /** コンテナを公開し、Threads Media ID を返す */
-function publishThreadsContainer(account: ThreadsAccount, creationId: string): string {
-  const res = fetchWithRetries(`${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publish`, {
-    method: "post",
-    payload: { creation_id: creationId, access_token: account.accessToken },
-    muteHttpExceptions: true,
-  });
-  const data = JSON.parse(res.getContentText());
-  if (!data.id) {
-    throw new Error(`Threads 公開に失敗: ${JSON.stringify(data)}`);
-  }
+function publishThreadsContainer(
+  account: AuthorizedThreadsAccount,
+  creationId: string
+): string {
+  const data = fetchThreadsJson(
+    "Threads 公開",
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publish`,
+    {
+      method: "post",
+      payload: { creation_id: creationId, access_token: account.accessToken },
+    },
+    "id"
+  );
   return data.id;
 }
 
@@ -448,10 +488,7 @@ function publishThreadsContainer(account: ThreadsAccount, creationId: string): s
  * @return 公開後の Threads Media ID
  */
 export function postToThreads(accountId: string, text: string): string {
-  const account = loadThreadsAccount(accountId);
-  if (!account.accessToken || !account.userId) {
-    throw new Error(`Threads account not authorized: ${accountId}. 再認可が必要です。`);
-  }
+  const account = loadAuthorizedThreadsAccount(accountId);
   const creationId = createThreadsContainer(account, text);
   waitForContainerFinished(account, creationId);
   return publishThreadsContainer(account, creationId);
@@ -465,37 +502,36 @@ export function getThreadsPublishingLimit(accountId: string): {
   quotaTotal: number;
   quotaDuration: number;
 } {
-  const account = loadThreadsAccount(accountId);
-  if (!account.accessToken || !account.userId) {
-    throw new Error(`Threads account not authorized: ${accountId}`);
-  }
-  const res = fetchWithRetries(
+  const account = loadAuthorizedThreadsAccount(accountId);
+  const data = fetchThreadsJson(
+    "レート制限情報の取得",
     `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publishing_limit` +
       `?fields=quota_usage,config&access_token=${encodeURIComponent(account.accessToken)}`,
-    { muteHttpExceptions: true }
+    {},
+    "data"
   );
-  const data = JSON.parse(res.getContentText());
-  const d = data.data && data.data[0];
+  const d = data.data[0];
   if (!d) {
     throw new Error(`レート制限情報の取得に失敗: ${JSON.stringify(data)}`);
   }
   return {
     quotaUsage: d.quota_usage || 0,
-    quotaTotal: (d.config && d.config.quota_total) || 250,
-    quotaDuration: (d.config && d.config.quota_duration) || 86400,
+    quotaTotal: (d.config && d.config.quota_total) || THREADS_DEFAULT_QUOTA_TOTAL,
+    quotaDuration:
+      (d.config && d.config.quota_duration) || THREADS_DEFAULT_QUOTA_DURATION_SECONDS,
   };
 }
 
 /**
- * 投稿クォータが尽きているか。尽きていれば投稿ループは見送って次回に持ち越す。
- * 判定できない場合（未認可・通信失敗等）は false を返し、実投稿側で正しく成否判定させる。
+ * 投稿クォータの残枠を返す。
+ * 判定できない場合（未認可・通信失敗等）は Infinity を返し、実投稿側で成否判定させる。
  */
-export function threadsPublishingLimitReached(accountId: string): boolean {
+export function getThreadsRemainingQuota(accountId: string): number {
   try {
     const { quotaUsage, quotaTotal } = getThreadsPublishingLimit(accountId);
-    return quotaUsage >= quotaTotal;
+    return Math.max(quotaTotal - quotaUsage, 0);
   } catch (e: any) {
-    Logger.log(`threadsPublishingLimitReached: 判定不能につき投稿を試行 (${accountId}): ${e.message}`);
-    return false;
+    Logger.log(`getThreadsRemainingQuota: 判定不能につき投稿を試行 (${accountId}): ${e.message}`);
+    return Infinity;
   }
 }

@@ -125,8 +125,14 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
       return jsonSuccess(initialized, 201);
     }
 
-    // これ以降はすべて署名検証を要求する。
-    assertProxyAuthorized(e, action, target, requestData, "POST");
+    // これ以降はすべて署名検証を要求する。認証失敗は 401 に確定させる
+    // （x_Autopost apiv2.ts の「assertProxyAuthorized 直前に statusCode=401」方式に相当）。
+    try {
+      assertProxyAuthorized(e, action, target, requestData, "POST");
+    } catch (authError: any) {
+      Logger.log(`doPost auth rejected (action=${action}, target=${target}): ${authError.message}`);
+      return jsonError(authError.message, 401);
+    }
     requestData = stripAuthField(requestData);
 
     switch (target) {
@@ -140,7 +146,7 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
     }
   } catch (error: any) {
     Logger.log(`doPost error (action=${action}, target=${target}): ${error.message}`);
-    const code = errorStatusCode(error);
+    const code = error instanceof NotImplementedError ? 501 : 400;
     return jsonError(error.message, code);
   }
 }
@@ -161,8 +167,13 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
     // Phase 3: Threads OAuth の無認証コールバックルートをここに追加する
     //          （target/action ではなく ?code=... で判定。ADR 0003）。
 
-    // これ以降はすべて署名検証を要求する。
-    assertProxyAuthorized(e, action, target, {}, "GET");
+    // これ以降はすべて署名検証を要求する。認証失敗は 401 に確定させる。
+    try {
+      assertProxyAuthorized(e, action, target, {}, "GET");
+    } catch (authError: any) {
+      Logger.log(`doGet auth rejected (action=${action}, target=${target}): ${authError.message}`);
+      return jsonError(authError.message, 401);
+    }
 
     switch (target) {
       case "blueskyAuth":
@@ -177,15 +188,7 @@ export function doGet(e: any): GoogleAppsScript.Content.TextOutput {
     }
   } catch (error: any) {
     Logger.log(`doGet error (action=${action}, target=${target}): ${error.message}`);
-    const code = errorStatusCode(error);
+    const code = error instanceof NotImplementedError ? 501 : 400;
     return jsonError(error.message, code);
   }
-}
-
-function errorStatusCode(error: any): number {
-  if (error instanceof NotImplementedError) return 501;
-  if (typeof error?.message === "string" && /signature|authoriz|timestamp|Duplicate|owner|登録されており/i.test(error.message)) {
-    return 401;
-  }
-  return 400;
 }

@@ -15,6 +15,8 @@
 //        GAS_URL=<url> node tools/proxy-test.mjs signed-post <uid> <proxySecret> [target] [action]
 //   5) 改竄署名（401 Invalid request signature が正常）:
 //        GAS_URL=<url> node tools/proxy-test.mjs bad-sig <uid> <proxySecret>
+//   6) 無署名（認証情報を一切付けず保護ルートを叩く。401 が正常）:
+//        GAS_URL=<url> node tools/proxy-test.mjs no-auth [target]
 //
 // 期待結果の読み方:
 //   - 認証ゲートを通過すると code:501 (Not implemented) が返る = 署名検証 OK（Phase 1 では正常）
@@ -185,6 +187,15 @@ async function cmdBadSig(uid, secret) {
   await cmdSignedGet(uid, secret + "_tampered", "postData");
 }
 
+async function cmdNoAuth(target = "postData") {
+  // 認証情報を一切付けずに保護ルートを GET する。401 で拒否されるのが正常。
+  const url = new URL(requireUrl());
+  url.searchParams.set("action", "fetch");
+  url.searchParams.set("target", target);
+  const res = await fetch(url, { method: "GET", redirect: "follow" });
+  await printResponse(res);
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 
 const run = {
@@ -193,11 +204,12 @@ const run = {
   "signed-get": () => cmdSignedGet(args[0], args[1], args[2]),
   "signed-post": () => cmdSignedPost(args[0], args[1], args[2], args[3]),
   "bad-sig": () => cmdBadSig(args[0], args[1]),
+  "no-auth": () => cmdNoAuth(args[0]),
 };
 
 if (!cmd || !run[cmd]) {
   console.error(
-    "usage: GAS_URL=<url> node tools/proxy-test.mjs <init|status|signed-get|signed-post|bad-sig> [...args]"
+    "usage: GAS_URL=<url> node tools/proxy-test.mjs <init|status|signed-get|signed-post|bad-sig|no-auth> [...args]"
   );
   process.exit(1);
 }

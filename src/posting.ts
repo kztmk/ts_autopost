@@ -9,14 +9,18 @@ import {
   updatePostStatus,
 } from "./api/postData";
 import { postToBluesky } from "./api/blueskyAuth";
-import { postToThreads, threadsPublishingLimitReached } from "./api/threadsAuth";
+import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
 import { logErrorToSheet } from "./utils";
 import { PostRow, Platform } from "./types";
 
 const MAX_POSTS_PER_RUN = 20;
 const LOCK_WAIT_MS = 0; // 取れなければ次のトリガー実行に任せる
+// Platform 型の全値と一致するが、シート上の不正値（手編集等）を弾くガードとして明示する。
 const SUPPORTED_PLATFORMS: Platform[] = ["bluesky", "threads"];
+// Threads クォータの安全マージン。「上限近接時は見送り」（development-plan Phase 4）の実装。
+// 残枠がこの値以下になったら投稿せず次回へ持ち越す（チェック後〜publish 間の枯渇レース対策）。
+const THREADS_QUOTA_SAFETY_MARGIN = 2;
 
 function isDue(postSchedule: string, nowMs: number): boolean {
   if (!postSchedule) return true; // 予約日時なし = 即時
@@ -38,15 +42,34 @@ function publishPost(post: PostRow): string {
 }
 
 /**
- * この Post を今回のランで「見送る」べきか（queued のまま残す）。
- * 現状は Threads のレート制限のみ。尽きていれば次回トリガーへ持ち越す。
+ * Threads クォータのラン内トラッカー。
+ * threads_publishing_limit API はアカウントごとに 1 ラン 1 回だけ呼び、
+ * 以降はラン内で消費数を差し引いて判定する（行ごとの API 呼び出しを避ける）。
  */
-function shouldDefer(post: PostRow): boolean {
-  if (post.platform === "threads" && threadsPublishingLimitReached(post.accountId)) {
-    Logger.log(`Threads publishing limit reached for ${post.accountId}; deferring ${post.id}.`);
-    return true;
+class ThreadsQuotaTracker {
+  private remaining: { [accountId: string]: number } = {};
+
+  /** この Post を見送るべきか（残枠がマージン以下）。Threads 以外は常に false */
+  shouldDefer(post: PostRow): boolean {
+    if (post.platform !== "threads") return false;
+    if (!(post.accountId in this.remaining)) {
+      this.remaining[post.accountId] = getThreadsRemainingQuota(post.accountId);
+    }
+    if (this.remaining[post.accountId] <= THREADS_QUOTA_SAFETY_MARGIN) {
+      Logger.log(
+        `Threads quota near limit for ${post.accountId} (remaining=${this.remaining[post.accountId]}); deferring ${post.id}.`
+      );
+      return true;
+    }
+    return false;
   }
-  return false;
+
+  /** 投稿を 1 件消費したことを記録する */
+  consume(post: PostRow): void {
+    if (post.platform === "threads" && post.accountId in this.remaining) {
+      this.remaining[post.accountId]--;
+    }
+  }
 }
 
 /**
@@ -76,15 +99,17 @@ export function autoPost(): void {
         isDue(r.postSchedule, nowMs)
     );
 
+    const quotaTracker = new ThreadsQuotaTracker();
     let processed = 0;
     for (const post of due) {
       if (processed >= MAX_POSTS_PER_RUN) break;
-      if (shouldDefer(post)) continue; // queued のまま次回へ
+      if (quotaTracker.shouldDefer(post)) continue; // queued のまま次回へ
 
       processed++;
       updatePostStatus(post.id, "processing");
       try {
         const platformPostId = publishPost(post);
+        quotaTracker.consume(post);
         try {
           movePostToPosted(post, platformPostId);
         } catch (moveError: any) {

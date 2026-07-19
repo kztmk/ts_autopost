@@ -5,18 +5,34 @@ import { deleteTriggersByHandler } from "../utils";
 
 export const POSTING_HANDLER = "autoPost";
 const TRIGGER_INTERVAL_PREFIX = "triggerInterval_";
+// GAS の everyMinutes が受け付ける値はこの 5 つのみ。
+// それ以外を渡すと「既存トリガー削除後に作成で例外 → トリガー消失」になるため事前検証する。
+const VALID_INTERVALS = [1, 5, 10, 15, 30];
+
+/** triggerInterval_* プロパティをすべて削除する（トリガー削除・作り直しの際の掃除） */
+function cleanupTriggerIntervalProps(): void {
+  const props = PropertiesService.getScriptProperties();
+  Object.keys(props.getProperties()).forEach((key) => {
+    if (key.indexOf(TRIGGER_INTERVAL_PREFIX) === 0) {
+      props.deleteProperty(key);
+    }
+  });
+}
 
 /**
  * 時間ベースの投稿トリガーを作成する。既存の autoPost トリガーは削除してから作り直す。
- * @param data intervalMinutes（1 以上の整数）
+ * @param data intervalMinutes（1 / 5 / 10 / 15 / 30 のいずれか）
  */
 export function createPostingTrigger(data: any) {
   const intervalMinutes = data?.intervalMinutes;
-  if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1) {
-    throw new Error("Invalid interval: must be an integer >= 1.");
+  if (VALID_INTERVALS.indexOf(intervalMinutes) === -1) {
+    throw new Error(
+      `Invalid interval: must be one of ${VALID_INTERVALS.join(", ")} (GAS everyMinutes の制約).`
+    );
   }
 
   deleteTriggersByHandler(POSTING_HANDLER);
+  cleanupTriggerIntervalProps();
 
   const trigger = ScriptApp.newTrigger(POSTING_HANDLER)
     .timeBased()
@@ -36,9 +52,10 @@ export function createPostingTrigger(data: any) {
   };
 }
 
-/** すべての autoPost トリガーを削除する */
+/** すべての autoPost トリガーを削除する（interval プロパティも掃除） */
 export function deletePostingTriggers() {
   const deleted = deleteTriggersByHandler(POSTING_HANDLER);
+  cleanupTriggerIntervalProps();
   return { status: "success", deleted };
 }
 

@@ -14,20 +14,25 @@ function indexMap(headers: readonly string[]): { [key: string]: number } {
   return map;
 }
 
-/** Posts シートの全行をオブジェクト（+ シート行番号 __row）で返す */
-export function readPostRows(): Array<PostRow & { __row: number }> {
-  const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
+/** シートの全データ行をオブジェクト（+ シート行番号 __row）として読む共通ヘルパ */
+function readSheetRows(sheetName: string, headers: readonly string[]): any[] {
+  const { sheet } = ensureSheet(sheetName, headers);
   const values = sheet.getDataRange().getValues();
   if (values.length <= 1) return [];
-  const map = indexMap(HEADERS.POST_HEADERS);
-  const rows: Array<PostRow & { __row: number }> = [];
+  const map = indexMap(headers);
+  const rows: any[] = [];
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     const obj: any = { __row: i + 1 };
-    HEADERS.POST_HEADERS.forEach((h) => (obj[h] = row[map[h]] ?? ""));
-    if (obj.id) rows.push(obj);
+    headers.forEach((h) => (obj[h] = row[map[h]] ?? ""));
+    rows.push(obj);
   }
   return rows;
+}
+
+/** Posts シートの全行をオブジェクト（+ シート行番号 __row）で返す */
+export function readPostRows(): Array<PostRow & { __row: number }> {
+  return readSheetRows(SHEETS.POSTS, HEADERS.POST_HEADERS).filter((r) => r.id);
 }
 
 /** Posts シートの全 Post を返す（API 用、__row は除く） */
@@ -120,14 +125,21 @@ export function deletePost(data: any) {
   return { id, deleted: deleted > 0 };
 }
 
-/** id 一致の Posts 行を failed にし、エラーを記録する */
-export function markPostFailed(id: string, errorMessage: string): void {
+/** id 一致の Posts 行の status（と任意で errorMessage）を更新する */
+export function updatePostStatus(id: string, status: string, errorMessage?: string): void {
   const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
   const map = indexMap(HEADERS.POST_HEADERS);
   const target = readPostRows().find((r) => String(r.id) === String(id));
   if (!target) return;
-  sheet.getRange(target.__row, map["status"] + 1).setValue("failed");
-  sheet.getRange(target.__row, map["errorMessage"] + 1).setValue(errorMessage);
+  sheet.getRange(target.__row, map["status"] + 1).setValue(status);
+  if (errorMessage !== undefined) {
+    sheet.getRange(target.__row, map["errorMessage"] + 1).setValue(errorMessage);
+  }
+}
+
+/** id 一致の Posts 行を failed にし、エラーを記録する */
+export function markPostFailed(id: string, errorMessage: string): void {
+  updatePostStatus(id, "failed", errorMessage);
 }
 
 /**
@@ -144,27 +156,19 @@ export function movePostToPosted(post: PostRow, postId: string): void {
   deletePostsByIds([post.id]);
 }
 
-function readSheetObjects(sheetName: string, headers: readonly string[]): any[] {
-  const { sheet } = ensureSheet(sheetName, headers);
-  const values = sheet.getDataRange().getValues();
-  if (values.length <= 1) return [];
-  const map = indexMap(headers);
-  const out: any[] = [];
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const obj: any = {};
-    headers.forEach((h) => (obj[h] = row[map[h]] ?? ""));
-    out.push(obj);
-  }
-  return out;
+function stripRowNumber(rows: any[]): any[] {
+  return rows.map((r) => {
+    const { __row, ...rest } = r;
+    return rest;
+  });
 }
 
 /** Posted シートの全行を返す（API 用） */
 export function fetchPostedData(): any[] {
-  return readSheetObjects(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
+  return stripRowNumber(readSheetRows(SHEETS.POSTED, HEADERS.POSTED_HEADERS));
 }
 
 /** Errors シートの全行を返す（API 用） */
 export function fetchErrorData(): any[] {
-  return readSheetObjects(SHEETS.ERRORS, HEADERS.ERROR_HEADERS);
+  return stripRowNumber(readSheetRows(SHEETS.ERRORS, HEADERS.ERROR_HEADERS));
 }

@@ -15,6 +15,7 @@ import {
   requireNonEmptyString,
   logErrorToSheet,
   newId,
+  deleteTriggersByHandler,
 } from "../utils";
 
 const THREADS_GRAPH = "https://graph.threads.net";
@@ -111,7 +112,11 @@ export function updateThreadsAuth(data: any) {
   }
 
   if (credsChanged) {
-    // 旧アプリのトークンは新しい App ID/Secret では更新できないため破棄する
+    // App ID/Secret の変更は通常「別の Meta アプリへの切替」を意味し、その場合
+    // 既存トークンは新アプリと無関係になる。タイポ修正のケースでは破棄は過剰だが、
+    // どちらか判別できないため安全側に倒して破棄し、再認可を促す
+    // （th_refresh_token 自体は access_token だけで動くので、技術的には旧トークンは
+    //   Secret 変更後もリフレッシュ可能。破棄は技術制約ではなく方針）。
     delete account.accessToken;
     delete account.userId;
     delete account.tokenSavedAt;
@@ -177,6 +182,16 @@ export function isThreadsOAuthCallback(e: any): boolean {
   return !p.target && Boolean(p.state) && Boolean(p.code || p.error);
 }
 
+/** 外部入力を HTML に埋め込む前のエスケープ（無認証ページのため必須） */
+function escapeHtml(value: any): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function callbackHtml(title: string, bodyHtml: string): GoogleAppsScript.HTML.HtmlOutput {
   return HtmlService.createHtmlOutput(
     `<div style="font-family: Arial, sans-serif; padding: 24px; color: #202124; max-width: 560px;">
@@ -184,6 +199,24 @@ function callbackHtml(title: string, bodyHtml: string): GoogleAppsScript.HTML.Ht
       <div style="font-size: 14px; line-height: 1.8;">${bodyHtml}</div>
     </div>`
   );
+}
+
+/**
+ * トークン系エンドポイントを叩き、access_token を含む JSON を返す。
+ * 失敗時はレスポンス全文を含む Error を投げる（呼び出し側で Errors シートに記録し、
+ * 無認証ページには出さないこと）。
+ */
+function fetchThreadsToken(
+  label: string,
+  url: string,
+  options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions
+): any {
+  const res = fetchWithRetries(url, { ...options, muteHttpExceptions: true });
+  const data = JSON.parse(res.getContentText());
+  if (!data.access_token) {
+    throw new Error(`${label}に失敗: ${JSON.stringify(data)}`);
+  }
+  return data;
 }
 
 /**
@@ -207,9 +240,10 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
   const { accountId, redirectUri } = JSON.parse(stateJson);
 
   if (p.error) {
+    // error_description はクエリ由来の外部入力。必ずエスケープして埋め込む
     return callbackHtml(
       "認可がキャンセルされました",
-      `Threads 側で認可が完了しませんでした。<br>理由: ${String(p.error_description || p.error)}`
+      `Threads 側で認可が完了しませんでした。<br>理由: ${escapeHtml(p.error_description || p.error)}`
     );
   }
 
@@ -217,7 +251,7 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
     const account = loadThreadsAccount(accountId);
 
     // ① 認可コード → 短期アクセストークン
-    const shortRes = fetchWithRetries(`${THREADS_GRAPH}/oauth/access_token`, {
+    const shortData = fetchThreadsToken("短期トークン取得", `${THREADS_GRAPH}/oauth/access_token`, {
       method: "post",
       payload: {
         client_id: account.appId,
@@ -226,24 +260,17 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
         redirect_uri: redirectUri,
         code: String(p.code),
       },
-      muteHttpExceptions: true,
     });
-    const shortData = JSON.parse(shortRes.getContentText());
-    if (!shortData.access_token) {
-      throw new Error(`短期トークン取得に失敗: ${JSON.stringify(shortData)}`);
-    }
 
     // ② 短期 → 長期アクセストークン（60 日）
-    const longUrl =
+    const longData = fetchThreadsToken(
+      "長期トークン取得",
       `${THREADS_GRAPH}/access_token` +
-      `?grant_type=th_exchange_token` +
-      `&client_secret=${encodeURIComponent(account.appSecret)}` +
-      `&access_token=${encodeURIComponent(shortData.access_token)}`;
-    const longRes = fetchWithRetries(longUrl, { muteHttpExceptions: true });
-    const longData = JSON.parse(longRes.getContentText());
-    if (!longData.access_token) {
-      throw new Error(`長期トークン取得に失敗: ${JSON.stringify(longData)}`);
-    }
+        `?grant_type=th_exchange_token` +
+        `&client_secret=${encodeURIComponent(account.appSecret)}` +
+        `&access_token=${encodeURIComponent(shortData.access_token)}`,
+      {}
+    );
 
     // ③ 保存 + トークン延命トリガーの確保
     account.userId = String(shortData.user_id);
@@ -254,16 +281,17 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
 
     return callbackHtml(
       "✅ 認証に成功しました",
-      `アカウント「${accountId}」の長期アクセストークンを保存しました。<br>このタブは閉じて構いません。`
+      `アカウント「${escapeHtml(accountId)}」の長期アクセストークンを保存しました。<br>このタブは閉じて構いません。`
     );
   } catch (err: any) {
     logErrorToSheet(
       { message: err.message, stack: err.stack, detail: `accountId=${accountId}` },
       "threadsOAuthCallback"
     );
+    // 無認証ページのため詳細（API 応答 JSON 等）は出さない。詳細は Errors シートへ。
     return callbackHtml(
       "エラーが発生しました",
-      `トークン交換中にエラーが発生しました。<br><pre style="white-space: pre-wrap;">${err.message}</pre>` +
+      "トークン交換中にエラーが発生しました。詳細はスプレッドシートの Errors シートに記録されています。<br>" +
         "アプリから認可 URL を再発行してやり直してください。"
     );
   }
@@ -273,21 +301,45 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
 
 export const THREADS_MAINTENANCE_HANDLER = "threadsTokenMaintenance";
 
-/** 日次メンテナンストリガーが無ければ作成する（認可完了時に自動確保） */
-export function ensureThreadsMaintenanceTrigger(): void {
+/** 日次メンテナンストリガーが無ければ作成する（認可完了時に自動確保。API からも呼べる） */
+export function ensureThreadsMaintenanceTrigger() {
   const exists = ScriptApp.getProjectTriggers().some(
     (t) => t.getHandlerFunction() === THREADS_MAINTENANCE_HANDLER
   );
-  if (exists) return;
+  if (exists) {
+    return { functionName: THREADS_MAINTENANCE_HANDLER, created: false, exists: true };
+  }
   ScriptApp.newTrigger(THREADS_MAINTENANCE_HANDLER).timeBased().everyDays(1).create();
   Logger.log("Threads token maintenance trigger created (daily).");
+  return { functionName: THREADS_MAINTENANCE_HANDLER, created: true, exists: true };
+}
+
+/** 日次メンテナンストリガーを削除する（誤作成時の後始末用 API） */
+export function deleteThreadsMaintenanceTrigger() {
+  const deleted = deleteTriggersByHandler(THREADS_MAINTENANCE_HANDLER);
+  return { functionName: THREADS_MAINTENANCE_HANDLER, deleted };
 }
 
 /**
- * 【トリガーハンドラ】全 Threads アカウントを走査し、発行から REFRESH_AFTER_DAYS を
+ * リフレッシュ開始閾値（日）。既定 30 日。
+ * スクリプトプロパティ THREADS_REFRESH_AFTER_DAYS で上書きできる
+ * （有効域 1〜55 日: 24 時間経過後から更新可・60 日で失効という Threads の窓に収める）。
+ */
+function getRefreshAfterDays(): number {
+  const raw = PropertiesService.getScriptProperties().getProperty(
+    "THREADS_REFRESH_AFTER_DAYS"
+  );
+  const n = raw ? parseInt(raw, 10) : NaN;
+  if (!isNaN(n) && n >= 1 && n <= 55) return n;
+  return REFRESH_AFTER_DAYS;
+}
+
+/**
+ * 【トリガーハンドラ】全 Threads アカウントを走査し、発行から閾値日数（既定 30 日）を
  * 超えた長期トークンをリフレッシュする。失敗はアカウント単位で Errors に記録して続行。
  */
 export function threadsTokenMaintenance(): void {
+  const refreshAfterDays = getRefreshAfterDays();
   const all = PropertiesService.getScriptProperties().getProperties();
   const accountKeys = Object.keys(all).filter(
     (k) => k.indexOf(THREADS_ACCOUNT_PREFIX) === 0
@@ -298,18 +350,16 @@ export function threadsTokenMaintenance(): void {
     if (!account.accessToken || !account.tokenSavedAt) return; // 未認可はスキップ
 
     const ageMs = Date.now() - new Date(account.tokenSavedAt).getTime();
-    if (ageMs < REFRESH_AFTER_DAYS * 24 * 60 * 60 * 1000) return; // まだ新しい
+    if (ageMs < refreshAfterDays * 24 * 60 * 60 * 1000) return; // まだ新しい
 
     try {
-      const url =
+      const data = fetchThreadsToken(
+        "トークン更新",
         `${THREADS_GRAPH}/refresh_access_token` +
-        `?grant_type=th_refresh_token` +
-        `&access_token=${encodeURIComponent(account.accessToken)}`;
-      const res = fetchWithRetries(url, { muteHttpExceptions: true });
-      const data = JSON.parse(res.getContentText());
-      if (!data.access_token) {
-        throw new Error(`トークン更新に失敗: ${JSON.stringify(data)}`);
-      }
+          `?grant_type=th_refresh_token` +
+          `&access_token=${encodeURIComponent(account.accessToken)}`,
+        {}
+      );
       account.accessToken = data.access_token;
       account.tokenSavedAt = new Date().toISOString();
       saveThreadsAccount(account);

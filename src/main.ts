@@ -36,6 +36,8 @@ import {
   getThreadsAuthorizeUrl,
   isThreadsOAuthCallback,
   handleThreadsOAuthCallback,
+  ensureThreadsMaintenanceTrigger,
+  deleteThreadsMaintenanceTrigger,
 } from "./api/threadsAuth";
 
 // ============================================================
@@ -196,6 +198,10 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonSuccess(createPostingTrigger(requestData), 201);
           case "delete":
             return jsonSuccess(deletePostingTriggers());
+          case "ensureMaintenance":
+            return jsonSuccess(ensureThreadsMaintenanceTrigger(), 201);
+          case "deleteMaintenance":
+            return jsonSuccess(deleteThreadsMaintenanceTrigger());
           default:
             return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
         }

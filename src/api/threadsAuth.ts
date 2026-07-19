@@ -416,7 +416,9 @@ function loadAuthorizedThreadsAccount(accountId: string): AuthorizedThreadsAccou
   return account as AuthorizedThreadsAccount;
 }
 
-/** メディアコンテナを作成し、creation_id を返す */
+const THREADS_MAX_CAROUSEL = 20; // Threads カルーセルの上限
+
+/** テキストのみのメディアコンテナを作成し、creation_id を返す */
 function createThreadsContainer(account: AuthorizedThreadsAccount, text: string): string {
   const data = fetchThreadsJson(
     "Threads コンテナ作成",
@@ -424,6 +426,74 @@ function createThreadsContainer(account: AuthorizedThreadsAccount, text: string)
     {
       method: "post",
       payload: { media_type: "TEXT", text, access_token: account.accessToken },
+    },
+    "id"
+  );
+  return data.id;
+}
+
+/** 単一画像のコンテナを作成する（Threads は公開 URL を渡し、Threads 側が取得する） */
+function createThreadsImageContainer(
+  account: AuthorizedThreadsAccount,
+  text: string,
+  imageUrl: string
+): string {
+  const data = fetchThreadsJson(
+    "Threads 画像コンテナ作成",
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
+    {
+      method: "post",
+      payload: {
+        media_type: "IMAGE",
+        image_url: imageUrl,
+        text,
+        access_token: account.accessToken,
+      },
+    },
+    "id"
+  );
+  return data.id;
+}
+
+/** カルーセルの子（画像アイテム）コンテナを作成する */
+function createThreadsCarouselItem(
+  account: AuthorizedThreadsAccount,
+  imageUrl: string
+): string {
+  const data = fetchThreadsJson(
+    "Threads カルーセル項目作成",
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
+    {
+      method: "post",
+      payload: {
+        media_type: "IMAGE",
+        image_url: imageUrl,
+        is_carousel_item: "true",
+        access_token: account.accessToken,
+      },
+    },
+    "id"
+  );
+  return data.id;
+}
+
+/** 複数画像のカルーセルコンテナを作成する（子は事前に FINISHED 済みであること） */
+function createThreadsCarouselContainer(
+  account: AuthorizedThreadsAccount,
+  text: string,
+  childIds: string[]
+): string {
+  const data = fetchThreadsJson(
+    "Threads カルーセルコンテナ作成",
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
+    {
+      method: "post",
+      payload: {
+        media_type: "CAROUSEL",
+        children: childIds.join(","),
+        text,
+        access_token: account.accessToken,
+      },
     },
     "id"
   );
@@ -484,14 +554,31 @@ function publishThreadsContainer(
 }
 
 /**
- * Threads にテキスト投稿する。
+ * Threads に投稿する（テキスト、任意で画像）。
+ * 画像 0 枚 = TEXT、1 枚 = IMAGE、2 枚以上 = CAROUSEL。
  * @return 公開後の Threads Media ID
  */
-export function postToThreads(accountId: string, text: string): string {
+export function postToThreads(accountId: string, text: string, mediaUrls?: string[]): string {
   const account = loadAuthorizedThreadsAccount(accountId);
-  const creationId = createThreadsContainer(account, text);
-  waitForContainerFinished(account, creationId);
-  return publishThreadsContainer(account, creationId);
+  const images = (mediaUrls || []).filter((u) => u && String(u).trim());
+
+  let containerId: string;
+  if (images.length === 0) {
+    containerId = createThreadsContainer(account, text);
+  } else if (images.length === 1) {
+    containerId = createThreadsImageContainer(account, text, images[0]);
+  } else {
+    if (images.length > THREADS_MAX_CAROUSEL) {
+      throw new Error(`Threads カルーセルは ${THREADS_MAX_CAROUSEL} 枚までです（${images.length} 枚指定）`);
+    }
+    // 各子コンテナを作成し、すべて FINISHED になってからカルーセル本体を作る
+    const childIds = images.map((url) => createThreadsCarouselItem(account, url));
+    childIds.forEach((id) => waitForContainerFinished(account, id));
+    containerId = createThreadsCarouselContainer(account, text, childIds);
+  }
+
+  waitForContainerFinished(account, containerId);
+  return publishThreadsContainer(account, containerId);
 }
 
 // ---- レート制限（threads_publishing_limit）----

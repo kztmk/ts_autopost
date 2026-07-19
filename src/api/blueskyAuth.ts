@@ -86,6 +86,18 @@ function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
 
 // ---- 投稿 ----
 
+const ALLOWED_IMAGE_MIME = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const BLUESKY_MAX_BLOB_BYTES = 1000000; // AT Protocol の blob 上限（1MB）
+const BLUESKY_MAX_IMAGES = 4; // app.bsky.embed.images は最大 4 枚
+
+/** トークン失効を表す内部エラー（回復して 1 回だけ再試行するトリガー） */
+class BlueskyAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BlueskyAuthError";
+  }
+}
+
 /** レスポンスがトークン失効によるものか判定する（401、または 400 + ExpiredToken/InvalidToken） */
 function isExpiredAuthResponse(res: GoogleAppsScript.URL_Fetch.HTTPResponse): boolean {
   const code = res.getResponseCode();
@@ -99,19 +111,61 @@ function isExpiredAuthResponse(res: GoogleAppsScript.URL_Fetch.HTTPResponse): bo
   }
 }
 
+/**
+ * 画像 URL をフェッチ・検証し、uploadBlob して blob 参照を返す。
+ * Bluesky は image_url 方式が無く、GAS がバイト列を uploadBlob する必要がある。
+ */
+function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
+  const fetchRes = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
+  if (fetchRes.getResponseCode() !== 200) {
+    throw new Error(`画像の取得に失敗 (HTTP ${fetchRes.getResponseCode()}): ${imageUrl}`);
+  }
+  const blob = fetchRes.getBlob();
+  const mime = (blob.getContentType() || "").toLowerCase();
+  if (ALLOWED_IMAGE_MIME.indexOf(mime) === -1) {
+    throw new Error(
+      `未対応の画像形式です (${mime || "unknown"}): ${imageUrl}。対応: JPEG/PNG/GIF/WebP`
+    );
+  }
+  const bytes = blob.getBytes();
+  if (bytes.length > BLUESKY_MAX_BLOB_BYTES) {
+    throw new Error(
+      `画像サイズが Bluesky の上限(1MB)を超えています (${bytes.length} bytes): ${imageUrl}`
+    );
+  }
+  const res = UrlFetchApp.fetch(`${BSKY_SERVICE}/xrpc/com.atproto.repo.uploadBlob`, {
+    method: "post",
+    contentType: mime,
+    headers: { Authorization: "Bearer " + account.accessJwt },
+    payload: bytes,
+    muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() === 401) {
+    throw new BlueskyAuthError("uploadBlob が 401");
+  }
+  const data = JSON.parse(res.getContentText());
+  if (!data.blob) {
+    throw new Error(`uploadBlob に失敗: ${JSON.stringify(data)}`);
+  }
+  return data.blob;
+}
+
 /** createRecord を 1 回叩く（HTTPResponse をそのまま返し、呼び出し側で失効判定する） */
 function createRecordRequest(
   account: BlueskyAccount,
-  text: string
+  text: string,
+  embed?: any
 ): GoogleAppsScript.URL_Fetch.HTTPResponse {
+  const record: any = {
+    $type: "app.bsky.feed.post",
+    text: text,
+    createdAt: new Date().toISOString(),
+  };
+  if (embed) record.embed = embed;
   const payload = {
     repo: account.did,
     collection: "app.bsky.feed.post",
-    record: {
-      $type: "app.bsky.feed.post",
-      text: text,
-      createdAt: new Date().toISOString(),
-    },
+    record,
   };
   return fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.repo.createRecord`, {
     method: "post",
@@ -122,35 +176,53 @@ function createRecordRequest(
   });
 }
 
+/** 画像アップロード + createRecord を 1 セット実行する。トークン失効時は BlueskyAuthError を投げる */
+function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]): string {
+  let embed: any = undefined;
+  if (images.length) {
+    const uploaded = images.map((url) => ({ alt: "", image: uploadBlueskyBlob(account, url) }));
+    embed = { $type: "app.bsky.embed.images", images: uploaded };
+  }
+  const res = createRecordRequest(account, text, embed);
+  if (isExpiredAuthResponse(res)) {
+    throw new BlueskyAuthError("createRecord が失効応答");
+  }
+  const data = JSON.parse(res.getContentText());
+  if (!data.uri) {
+    throw new Error(`Bluesky 投稿に失敗しました: ${JSON.stringify(data)}`);
+  }
+  return data.uri;
+}
+
 /**
- * Bluesky にテキスト投稿する。トークン失効時はオンデマンドで回復して 1 回だけ再試行する。
+ * Bluesky に投稿する（テキスト、任意で画像 1〜4 枚）。
+ * トークン失効時はオンデマンドで回復して 1 回だけ再試行する
+ * （400 の文字数超過等では回復せず、そのままエラーにする）。
  * @return 投稿の AT URI（例: at://did:plc:xxxx/app.bsky.feed.post/xxxx）
  */
-export function postToBluesky(accountId: string, text: string): string {
+export function postToBluesky(accountId: string, text: string, mediaUrls?: string[]): string {
+  const images = (mediaUrls || []).filter((u) => u && String(u).trim());
+  if (images.length > BLUESKY_MAX_IMAGES) {
+    throw new Error(`Bluesky は画像 ${BLUESKY_MAX_IMAGES} 枚までです（${images.length} 枚指定）`);
+  }
+
   let account = loadBlueskyAccount(accountId);
   if (!account.accessJwt || !account.did) {
     account = blueskyLogin(account);
   }
 
-  let res = createRecordRequest(account, text);
-
-  // accessJwt 失効 → refresh、だめなら再ログインして 1 回だけ再試行。
-  // 400 は文字数超過などの正規エラーでも返るため、本文の error 種別で失効時のみ回復する
-  // （そうしないと正規の 400 で refresh + 再ログイン + 再送を浪費する）。
-  if (isExpiredAuthResponse(res)) {
+  try {
+    return doBlueskyPost(account, text, images);
+  } catch (e) {
+    if (!(e instanceof BlueskyAuthError)) throw e;
+    // 失効 → refresh、だめなら再ログインして 1 回だけ再試行（blob も新トークンで再アップロード）
     try {
       account = blueskyRefresh(account);
-    } catch (e) {
+    } catch (refreshErr) {
       account = blueskyLogin(account);
     }
-    res = createRecordRequest(account, text);
+    return doBlueskyPost(account, text, images);
   }
-
-  const data = JSON.parse(res.getContentText());
-  if (!data.uri) {
-    throw new Error(`Bluesky 投稿に失敗しました (${accountId}): ${JSON.stringify(data)}`);
-  }
-  return data.uri;
 }
 
 // ---- アカウント CRUD（ルーターから呼ばれる）----

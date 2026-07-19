@@ -101,6 +101,22 @@ export function showSetupCodeDialog(): void {
 }
 
 /**
+ * 【エディタ実行用】本人確認コードを生成し、実行ログに出力する。
+ *
+ * showSetupCodeDialog は SpreadsheetApp.getUi()（UI コンテキスト）を必要とし、
+ * エディタの実行ボタンからは Permission エラーになる。またメニュー初回クリックは
+ * 「承認」と「UI 表示」が同時に必要で失敗しやすい。この関数は getUi を使わないため
+ * エディタから実行でき、初回実行で OAuth 承認も同時に完了する。
+ *
+ * 生成されるコードは 10 分間有効な一回限りの本人確認用（proxySecret ではない）。
+ * 実行ログは所有者しか見られないが、セットアップ完了後はこの関数を削除してもよい。
+ */
+export function setup_generateSetupCode(): void {
+  const code = generateSetupCode();
+  Logger.log("本人確認コード（10分間有効・アプリの接続画面に入力）: " + code);
+}
+
+/**
  * POST リクエストの処理。
  */
 export function doPost(e: any): GoogleAppsScript.Content.TextOutput {

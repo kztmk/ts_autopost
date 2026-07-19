@@ -19,6 +19,7 @@ import {
 } from "../utils";
 
 const THREADS_GRAPH = "https://graph.threads.net";
+const THREADS_GRAPH_V1 = "https://graph.threads.net/v1.0";
 const THREADS_AUTHORIZE_URL = "https://threads.net/oauth/authorize";
 const THREADS_SCOPES = "threads_basic,threads_content_publish,threads_manage_insights";
 const THREADS_ACCOUNT_PREFIX = "THREADS_ACCOUNT_";
@@ -375,4 +376,126 @@ export function threadsTokenMaintenance(): void {
       );
     }
   });
+}
+
+// ---- 投稿（コンテナ作成 → FINISHED 待ち → 公開の 2 ステップ）----
+
+const CONTAINER_POLL_ATTEMPTS = 6;
+const CONTAINER_POLL_INTERVAL_MS = 2000;
+
+// ユーザースコープのエンドポイントはトークン所有者エイリアス "me" を使う。
+// OAuth の user_id をパスに使うと code 100/subcode 33（object does not exist）になるため、
+// トークンから解決される "me" を使ってアカウント ID 不一致を避ける。
+const THREADS_ME = "me";
+
+/** メディアコンテナを作成し、creation_id を返す */
+function createThreadsContainer(account: ThreadsAccount, text: string): string {
+  const res = fetchWithRetries(`${THREADS_GRAPH_V1}/${THREADS_ME}/threads`, {
+    method: "post",
+    payload: { media_type: "TEXT", text, access_token: account.accessToken },
+    muteHttpExceptions: true,
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.id) {
+    throw new Error(`Threads コンテナ作成に失敗: ${JSON.stringify(data)}`);
+  }
+  return data.id;
+}
+
+/**
+ * コンテナが公開可能（FINISHED）になるまでポーリングする（固定 sleep ではない）。
+ * TEXT は通常即 FINISHED だが、稀に処理中のことがあるため状態を確認してから公開する。
+ */
+function waitForContainerFinished(account: ThreadsAccount, creationId: string): void {
+  for (let i = 0; i < CONTAINER_POLL_ATTEMPTS; i++) {
+    const res = fetchWithRetries(
+      `${THREADS_GRAPH_V1}/${creationId}?fields=status,error_message` +
+        `&access_token=${encodeURIComponent(account.accessToken as string)}`,
+      { muteHttpExceptions: true }
+    );
+    const data = JSON.parse(res.getContentText());
+    const status = String(data.status || "");
+    if (status === "FINISHED") return;
+    if (status === "ERROR" || status === "EXPIRED") {
+      throw new Error(
+        `Threads コンテナが ${status}: ${data.error_message || JSON.stringify(data)}`
+      );
+    }
+    // IN_PROGRESS 等は待って再確認
+    if (i < CONTAINER_POLL_ATTEMPTS - 1) {
+      Utilities.sleep(CONTAINER_POLL_INTERVAL_MS);
+    }
+  }
+  throw new Error("Threads コンテナが所定時間内に FINISHED になりませんでした。");
+}
+
+/** コンテナを公開し、Threads Media ID を返す */
+function publishThreadsContainer(account: ThreadsAccount, creationId: string): string {
+  const res = fetchWithRetries(`${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publish`, {
+    method: "post",
+    payload: { creation_id: creationId, access_token: account.accessToken },
+    muteHttpExceptions: true,
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.id) {
+    throw new Error(`Threads 公開に失敗: ${JSON.stringify(data)}`);
+  }
+  return data.id;
+}
+
+/**
+ * Threads にテキスト投稿する。
+ * @return 公開後の Threads Media ID
+ */
+export function postToThreads(accountId: string, text: string): string {
+  const account = loadThreadsAccount(accountId);
+  if (!account.accessToken || !account.userId) {
+    throw new Error(`Threads account not authorized: ${accountId}. 再認可が必要です。`);
+  }
+  const creationId = createThreadsContainer(account, text);
+  waitForContainerFinished(account, creationId);
+  return publishThreadsContainer(account, creationId);
+}
+
+// ---- レート制限（threads_publishing_limit）----
+
+/** 現在の投稿クォータ使用状況を返す */
+export function getThreadsPublishingLimit(accountId: string): {
+  quotaUsage: number;
+  quotaTotal: number;
+  quotaDuration: number;
+} {
+  const account = loadThreadsAccount(accountId);
+  if (!account.accessToken || !account.userId) {
+    throw new Error(`Threads account not authorized: ${accountId}`);
+  }
+  const res = fetchWithRetries(
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publishing_limit` +
+      `?fields=quota_usage,config&access_token=${encodeURIComponent(account.accessToken)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  const d = data.data && data.data[0];
+  if (!d) {
+    throw new Error(`レート制限情報の取得に失敗: ${JSON.stringify(data)}`);
+  }
+  return {
+    quotaUsage: d.quota_usage || 0,
+    quotaTotal: (d.config && d.config.quota_total) || 250,
+    quotaDuration: (d.config && d.config.quota_duration) || 86400,
+  };
+}
+
+/**
+ * 投稿クォータが尽きているか。尽きていれば投稿ループは見送って次回に持ち越す。
+ * 判定できない場合（未認可・通信失敗等）は false を返し、実投稿側で正しく成否判定させる。
+ */
+export function threadsPublishingLimitReached(accountId: string): boolean {
+  try {
+    const { quotaUsage, quotaTotal } = getThreadsPublishingLimit(accountId);
+    return quotaUsage >= quotaTotal;
+  } catch (e: any) {
+    Logger.log(`threadsPublishingLimitReached: 判定不能につき投稿を試行 (${accountId}): ${e.message}`);
+    return false;
+  }
 }

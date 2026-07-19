@@ -1,6 +1,6 @@
 // 投稿ループ（トリガーハンドラ autoPost）。
 // Posts シートを走査し、時刻の来た Post を各 Platform へ投稿して Posted へ移送する。
-// Phase 2 では Bluesky のみ実処理する（Threads は Phase 4、スレッド連投は Phase 6）。
+// Bluesky / Threads を実処理する（スレッド連投 inReplyTo は Phase 6）。
 
 import {
   readPostRows,
@@ -9,12 +9,14 @@ import {
   updatePostStatus,
 } from "./api/postData";
 import { postToBluesky } from "./api/blueskyAuth";
+import { postToThreads, threadsPublishingLimitReached } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
 import { logErrorToSheet } from "./utils";
-import { PostRow } from "./types";
+import { PostRow, Platform } from "./types";
 
 const MAX_POSTS_PER_RUN = 20;
 const LOCK_WAIT_MS = 0; // 取れなければ次のトリガー実行に任せる
+const SUPPORTED_PLATFORMS: Platform[] = ["bluesky", "threads"];
 
 function isDue(postSchedule: string, nowMs: number): boolean {
   if (!postSchedule) return true; // 予約日時なし = 即時
@@ -26,6 +28,25 @@ function isDue(postSchedule: string, nowMs: number): boolean {
 function isQueued(row: PostRow): boolean {
   const status = String(row.status || ""); // シートのセルは空文字のこともある
   return (status === "queued" || status === "") && !row.postId;
+}
+
+/** Post を該当 Platform へ投稿し、公開後の投稿 ID を返す */
+function publishPost(post: PostRow): string {
+  if (post.platform === "bluesky") return postToBluesky(post.accountId, post.contents);
+  if (post.platform === "threads") return postToThreads(post.accountId, post.contents);
+  throw new Error(`Unsupported platform: ${post.platform}`);
+}
+
+/**
+ * この Post を今回のランで「見送る」べきか（queued のまま残す）。
+ * 現状は Threads のレート制限のみ。尽きていれば次回トリガーへ持ち越す。
+ */
+function shouldDefer(post: PostRow): boolean {
+  if (post.platform === "threads" && threadsPublishingLimitReached(post.accountId)) {
+    Logger.log(`Threads publishing limit reached for ${post.accountId}; deferring ${post.id}.`);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -48,29 +69,31 @@ export function autoPost(): void {
   try {
     const nowMs = Date.now();
     const due = readPostRows().filter(
-      (r) => isQueued(r) && !r.inReplyTo && isDue(r.postSchedule, nowMs)
+      (r) =>
+        isQueued(r) &&
+        !r.inReplyTo &&
+        SUPPORTED_PLATFORMS.indexOf(r.platform) !== -1 &&
+        isDue(r.postSchedule, nowMs)
     );
 
     let processed = 0;
     for (const post of due) {
       if (processed >= MAX_POSTS_PER_RUN) break;
-
-      // Threads は Phase 4 で実装。それまでは queued のまま残す。
-      if (post.platform !== "bluesky") continue;
+      if (shouldDefer(post)) continue; // queued のまま次回へ
 
       processed++;
       updatePostStatus(post.id, "processing");
       try {
-        const uri = postToBluesky(post.accountId, post.contents);
+        const platformPostId = publishPost(post);
         try {
-          movePostToPosted(post, uri);
+          movePostToPosted(post, platformPostId);
         } catch (moveError: any) {
           // 投稿自体は成功している。processing のまま残し、再投稿はしない。
           logErrorToSheet(
             {
               message: `投稿は成功したが Posted への移送に失敗: ${moveError.message}`,
               stack: moveError.stack,
-              detail: `platform=bluesky accountId=${post.accountId} postId=${post.id} uri=${uri}`,
+              detail: `platform=${post.platform} accountId=${post.accountId} postId=${post.id} published=${platformPostId}`,
             },
             "autoPost/movePostToPosted"
           );
@@ -81,21 +104,20 @@ export function autoPost(): void {
           {
             message: e.message,
             stack: e.stack,
-            detail: `platform=bluesky accountId=${post.accountId} postId=${post.id}`,
+            detail: `platform=${post.platform} accountId=${post.accountId} postId=${post.id}`,
           },
-          "autoPost/bluesky"
+          `autoPost/${post.platform}`
         );
       }
     }
 
-    // 実処理対象（bluesky・スレッド子でない）の queued が無ければトリガーを自動削除する。
-    // Threads の queued はまだ残るため bluesky に限って判定（Phase 4 で見直す）。
-    // inReplyTo 付きの子行は Phase 6 まで投稿対象外なので、判定からも除外する
-    // （除外しないと子行が残る限りトリガーが空実行を続ける）。
-    const remainingBluesky = readPostRows().filter(
-      (r) => isQueued(r) && r.platform === "bluesky" && !r.inReplyTo
+    // 実処理対象（対応 Platform・スレッド子でない）の queued が無ければトリガーを自動削除。
+    // レート制限で見送った Threads 行は queued のまま残るので、その間はトリガーを維持し
+    // 次回以降で再試行する（クォータは 24 時間で回復する）。
+    const remaining = readPostRows().filter(
+      (r) => isQueued(r) && !r.inReplyTo && SUPPORTED_PLATFORMS.indexOf(r.platform) !== -1
     );
-    if (remainingBluesky.length === 0) {
+    if (remaining.length === 0) {
       deletePostingTriggers();
     }
   } finally {

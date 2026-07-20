@@ -16,6 +16,7 @@ import {
   logErrorToSheet,
   newId,
   deleteTriggersByHandler,
+  filterImageUrls,
 } from "../utils";
 
 const THREADS_GRAPH = "https://graph.threads.net";
@@ -395,6 +396,11 @@ const CONTAINER_POLL_INTERVAL_MS = 2000;
 /** クォータの既定値（API が config を返さなかった場合の Threads 既定） */
 const THREADS_DEFAULT_QUOTA_TOTAL = 250;
 const THREADS_DEFAULT_QUOTA_DURATION_SECONDS = 86400;
+/**
+ * カルーセル画像の上限。Meta 規定は 20 だが、子コンテナごとの FINISHED ポーリング
+ * （最悪 12 秒/枚）が GAS の実行時間制限（6 分）を圧迫するため 10 に抑える。
+ */
+const THREADS_MAX_CAROUSEL = 10;
 
 // ユーザースコープのエンドポイントはトークン所有者エイリアス "me" を使う。
 // OAuth の user_id をパスに使うと code 100/subcode 33（object does not exist）になるため、
@@ -416,84 +422,22 @@ function loadAuthorizedThreadsAccount(accountId: string): AuthorizedThreadsAccou
   return account as AuthorizedThreadsAccount;
 }
 
-const THREADS_MAX_CAROUSEL = 20; // Threads カルーセルの上限
-
-/** テキストのみのメディアコンテナを作成し、creation_id を返す */
-function createThreadsContainer(account: AuthorizedThreadsAccount, text: string): string {
-  const data = fetchThreadsJson(
-    "Threads コンテナ作成",
-    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
-    {
-      method: "post",
-      payload: { media_type: "TEXT", text, access_token: account.accessToken },
-    },
-    "id"
-  );
-  return data.id;
-}
-
-/** 単一画像のコンテナを作成する（Threads は公開 URL を渡し、Threads 側が取得する） */
-function createThreadsImageContainer(
+/**
+ * メディアコンテナを作成し、creation_id を返す。
+ * payload には media_type ごとの追加フィールド（text / image_url / children 等）を渡す。
+ * access_token はここで付与する。
+ */
+function createThreadsMediaContainer(
   account: AuthorizedThreadsAccount,
-  text: string,
-  imageUrl: string
+  label: string,
+  payload: { [key: string]: string }
 ): string {
   const data = fetchThreadsJson(
-    "Threads 画像コンテナ作成",
+    label,
     `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
     {
       method: "post",
-      payload: {
-        media_type: "IMAGE",
-        image_url: imageUrl,
-        text,
-        access_token: account.accessToken,
-      },
-    },
-    "id"
-  );
-  return data.id;
-}
-
-/** カルーセルの子（画像アイテム）コンテナを作成する */
-function createThreadsCarouselItem(
-  account: AuthorizedThreadsAccount,
-  imageUrl: string
-): string {
-  const data = fetchThreadsJson(
-    "Threads カルーセル項目作成",
-    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
-    {
-      method: "post",
-      payload: {
-        media_type: "IMAGE",
-        image_url: imageUrl,
-        is_carousel_item: "true",
-        access_token: account.accessToken,
-      },
-    },
-    "id"
-  );
-  return data.id;
-}
-
-/** 複数画像のカルーセルコンテナを作成する（子は事前に FINISHED 済みであること） */
-function createThreadsCarouselContainer(
-  account: AuthorizedThreadsAccount,
-  text: string,
-  childIds: string[]
-): string {
-  const data = fetchThreadsJson(
-    "Threads カルーセルコンテナ作成",
-    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads`,
-    {
-      method: "post",
-      payload: {
-        media_type: "CAROUSEL",
-        children: childIds.join(","),
-        text,
-        access_token: account.accessToken,
-      },
+      payload: { ...payload, access_token: account.accessToken },
     },
     "id"
   );
@@ -560,21 +504,38 @@ function publishThreadsContainer(
  */
 export function postToThreads(accountId: string, text: string, mediaUrls?: string[]): string {
   const account = loadAuthorizedThreadsAccount(accountId);
-  const images = (mediaUrls || []).filter((u) => u && String(u).trim());
+  const images = filterImageUrls(mediaUrls);
 
   let containerId: string;
   if (images.length === 0) {
-    containerId = createThreadsContainer(account, text);
+    containerId = createThreadsMediaContainer(account, "Threads コンテナ作成", {
+      media_type: "TEXT",
+      text,
+    });
   } else if (images.length === 1) {
-    containerId = createThreadsImageContainer(account, text, images[0]);
+    containerId = createThreadsMediaContainer(account, "Threads 画像コンテナ作成", {
+      media_type: "IMAGE",
+      image_url: images[0],
+      text,
+    });
   } else {
     if (images.length > THREADS_MAX_CAROUSEL) {
       throw new Error(`Threads カルーセルは ${THREADS_MAX_CAROUSEL} 枚までです（${images.length} 枚指定）`);
     }
     // 各子コンテナを作成し、すべて FINISHED になってからカルーセル本体を作る
-    const childIds = images.map((url) => createThreadsCarouselItem(account, url));
+    const childIds = images.map((url) =>
+      createThreadsMediaContainer(account, "Threads カルーセル項目作成", {
+        media_type: "IMAGE",
+        image_url: url,
+        is_carousel_item: "true",
+      })
+    );
     childIds.forEach((id) => waitForContainerFinished(account, id));
-    containerId = createThreadsCarouselContainer(account, text, childIds);
+    containerId = createThreadsMediaContainer(account, "Threads カルーセルコンテナ作成", {
+      media_type: "CAROUSEL",
+      children: childIds.join(","),
+      text,
+    });
   }
 
   waitForContainerFinished(account, containerId);

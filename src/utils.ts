@@ -99,14 +99,9 @@ export function requireNonEmptyString(value: any, field: string): string {
   return s;
 }
 
-/** JSON を安全にパースする。失敗時は fallback を返す */
-export function safeJsonParse<T>(text: string | null | undefined, fallback: T): T {
-  if (!text) return fallback;
-  try {
-    return JSON.parse(text) as T;
-  } catch (e) {
-    return fallback;
-  }
+/** 画像 URL リストから空要素を除いて正規化する（各 platform の投稿関数で共用） */
+export function filterImageUrls(mediaUrls?: string[]): string[] {
+  return (mediaUrls || []).map((u) => String(u ?? "").trim()).filter((u) => u.length > 0);
 }
 
 /**

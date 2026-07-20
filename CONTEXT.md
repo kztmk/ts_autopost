@@ -13,7 +13,7 @@ _Avoid_: SNS、サービス、ターゲット
 _Avoid_: プロフィール、認証情報（credentials は PlatformAccount の属性であって同義語ではない）
 
 **Post（投稿）**:
-ちょうど1つの PlatformAccount 宛の1配信。シート上の1行に対応し、ステータス・エラー・公開後の投稿ID（Threads Media ID / Bluesky AT URI）を行単位で完結して持つ。
+ちょうど1つの PlatformAccount へ投稿される1単位。シート上の1行に対応し、ステータス・エラー・公開後の投稿ID（Threads Media ID / Bluesky AT URI）を行単位で完結して持つ。
 _Avoid_: コンテンツ（本文そのものは Post の属性）、配信
 
 **Cross-post（クロスポスト / 同時投稿）**:

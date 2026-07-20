@@ -277,10 +277,12 @@ export function writePostedEngagement(
   id: string,
   eng: { views: number; likes: number; replies: number; reposts: number; quotes: number; shares: number }
 ): boolean {
+  const targetId = String(id ?? "").trim();
+  if (!targetId) return false; // 空 id で検索すると別の欠損 id 行に誤書き込みするため弾く
   const { sheet } = ensureSheet(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
   const map = indexMap(HEADERS.POSTED_HEADERS);
   const target = readSheetRows(SHEETS.POSTED, HEADERS.POSTED_HEADERS).find(
-    (r) => String(r.id) === String(id)
+    (r) => String(r.id) === targetId
   );
   if (!target) return false;
   // views〜shares は連続列なのでまとめて書き、更新日時を別途書く

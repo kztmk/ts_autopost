@@ -11,6 +11,8 @@ import { Engagement, Platform } from "./types";
 // レート制限対策: 投稿ごとの待機と、GAS 実行時間制限を睨んだ時間予算
 const ENGAGEMENT_FETCH_INTERVAL_MS = 500;
 const ENGAGEMENT_TIME_BUDGET_MS = 5 * 60 * 1000;
+// 前回どこまで処理したかを記憶するカーソル（ラウンドロビン用）
+const ENGAGEMENT_CURSOR_PROP = "engagement_cursor";
 
 /** 投稿単位のエンゲージメントを Platform に応じて取得する */
 function getPostEngagement(platform: Platform, accountId: string, postId: string): Engagement {
@@ -22,44 +24,73 @@ function getPostEngagement(platform: Platform, accountId: string, postId: string
 /**
  * 【トリガーハンドラ】Posted シートを走査し、各投稿のエンゲージメントを最新化する。
  * 失敗した行はスキップして続行し、Errors に記録する。
- * 時間予算を超えたら中断（次回の日次実行で続きが更新される）。
+ *
+ * 飢餓対策（カーソル方式のラウンドロビン）:
+ * 前回処理した行の次から開始し、一巡する。時間予算で中断しても次回は続きから始まるため、
+ * 恒久的に取得失敗する行が毎回先頭に来て他行を飢えさせることがない。
+ *
+ * 排他: アーカイブ（Posted のコピー→削除）と同じ ScriptLock を取り、更新の取りこぼしを防ぐ。
+ * autoPost が実行中（ロック保持中）なら今回はスキップし、次回の実行に委ねる。
  */
 export function updateAllEngagement(): void {
-  const startMs = Date.now();
-  // 更新が古い行（未更新は最古扱い）から処理する。時間予算で中断しても、
-  // 次回実行では前回更新できなかった行が先頭に来るので、全行が順に更新される。
-  const rows = readPostedRows().sort((a: any, b: any) =>
-    String(a.insightsUpdatedAt || "").localeCompare(String(b.insightsUpdatedAt || ""))
-  );
-  let updated = 0;
-  let skipped = 0;
-
-  for (const row of rows) {
-    if (Date.now() - startMs > ENGAGEMENT_TIME_BUDGET_MS) {
-      Logger.log(`updateAllEngagement: 時間予算に達したため中断（${updated}件更新）。`);
-      break;
-    }
-    const postId = String(row.postId || "");
-    const platform = String(row.platform || "") as Platform;
-    if (!postId || (platform !== "threads" && platform !== "bluesky")) {
-      continue;
-    }
-    try {
-      const eng = getPostEngagement(platform, row.accountId, postId);
-      // 書き込みは id で行を再検索する（並行アーカイブでのシート差し替えに対して安全）
-      writePostedEngagement(String(row.id), eng);
-      updated++;
-    } catch (e: any) {
-      skipped++;
-      logErrorToSheet(
-        { message: e.message, stack: e.stack, detail: `platform=${platform} postId=${postId} id=${row.id}` },
-        "updateAllEngagement"
-      );
-    }
-    Utilities.sleep(ENGAGEMENT_FETCH_INTERVAL_MS);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) {
+    Logger.log("updateAllEngagement: 他処理がロック中のためスキップ（次回に再開）。");
+    return;
   }
+  try {
+    const startMs = Date.now();
+    const props = PropertiesService.getScriptProperties();
+    const rows = readPostedRows();
+    if (rows.length === 0) {
+      Logger.log("updateAllEngagement: 対象なし。");
+      return;
+    }
 
-  Logger.log(`updateAllEngagement 完了: 更新=${updated} スキップ=${skipped} / 全${rows.length}行。`);
+    const cursor = props.getProperty(ENGAGEMENT_CURSOR_PROP) || "";
+    const cursorIdx = rows.findIndex((r: any) => String(r.id) === cursor);
+    const startIdx = cursorIdx >= 0 ? (cursorIdx + 1) % rows.length : 0;
+
+    let updated = 0;
+    let skipped = 0;
+    let lastId = cursor;
+
+    for (let k = 0; k < rows.length; k++) {
+      if (Date.now() - startMs > ENGAGEMENT_TIME_BUDGET_MS) {
+        Logger.log(`updateAllEngagement: 時間予算に達したため中断（${updated}件更新）。`);
+        break;
+      }
+      const row: any = rows[(startIdx + k) % rows.length];
+      const id = String(row.id || "").trim();
+      const postId = String(row.postId || "");
+      const platform = String(row.platform || "") as Platform;
+      if (!id || !postId || (platform !== "threads" && platform !== "bluesky")) {
+        continue; // 処理対象外（カーソルは進めない）
+      }
+      lastId = id; // 成否に関わらずカーソルを進め、次回は次の行から始める
+      try {
+        const eng = getPostEngagement(platform, row.accountId, postId);
+        // 書き込みは id で行を再検索する（並行アーカイブでのシート差し替えに対して安全）
+        if (writePostedEngagement(id, eng)) {
+          updated++;
+        } else {
+          skipped++; // 対象行が見つからない（アーカイブ等）→ 更新扱いにしない
+        }
+      } catch (e: any) {
+        skipped++;
+        logErrorToSheet(
+          { message: e.message, stack: e.stack, detail: `platform=${platform} postId=${postId} id=${id}` },
+          "updateAllEngagement"
+        );
+      }
+      Utilities.sleep(ENGAGEMENT_FETCH_INTERVAL_MS);
+    }
+
+    props.setProperty(ENGAGEMENT_CURSOR_PROP, lastId);
+    Logger.log(`updateAllEngagement 完了: 更新=${updated} スキップ=${skipped} / 全${rows.length}行。`);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** 【エディタ実行用】エンゲージメント更新を 1 回手動実行する */

@@ -4,6 +4,11 @@ import { ensureSheet } from "./sheets";
 
 /**
  * Errors シートにエラーを記録する。シートが無ければ作成する。
+ * （ScriptLock は取らない。GAS の ScriptLock は再入不可で、autoPost/sweep 実行中
+ *  = ロック保持中に呼ばれると取得できずログを落とすため。主要な書き込み元
+ *  autoPost/updateAllEngagement/archive が同じ ScriptLock で直列化されており、
+ *  それらの実行中はアーカイブがブロックされる。ロック外からの単発エラーログが
+ *  アーカイブの Errors コピー〜削除の一瞬と重なった場合のみ取りこぼしうるが影響は軽微。）
  */
 export function logErrorToSheet(errorInfo: ErrorLogEntry, context: string): void {
   try {

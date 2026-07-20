@@ -4,7 +4,7 @@
 // （development-plan.md Phase 2 / トークン更新方針）。
 
 import { BlueskyAccount } from "../types";
-import { maskSensitive, fetchWithRetries, requireNonEmptyString } from "../utils";
+import { maskSensitive, fetchWithRetries, requireNonEmptyString, filterImageUrls } from "../utils";
 
 const BSKY_SERVICE = "https://bsky.social";
 const BSKY_ACCOUNT_PREFIX = "BLUESKY_ACCOUNT_";
@@ -114,6 +114,8 @@ function isExpiredAuthResponse(res: GoogleAppsScript.URL_Fetch.HTTPResponse): bo
 /**
  * 画像 URL をフェッチ・検証し、uploadBlob して blob 参照を返す。
  * Bluesky は image_url 方式が無く、GAS がバイト列を uploadBlob する必要がある。
+ * 注: 画像 URL のフェッチのみ生 UrlFetchApp（外部任意ホストでありプラットフォーム API ではない。
+ *     失敗は即エラーで良い）。uploadBlob はプラットフォーム API なので fetchWithRetries 経由。
  */
 function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
   const fetchRes = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
@@ -124,24 +126,24 @@ function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
   const mime = (blob.getContentType() || "").toLowerCase();
   if (ALLOWED_IMAGE_MIME.indexOf(mime) === -1) {
     throw new Error(
-      `未対応の画像形式です (${mime || "unknown"}): ${imageUrl}。対応: JPEG/PNG/GIF/WebP`
+      `未対応の画像形式です (${mime || "unknown"}): ${imageUrl}。対応: ${ALLOWED_IMAGE_MIME.join("/")}`
     );
   }
   const bytes = blob.getBytes();
   if (bytes.length > BLUESKY_MAX_BLOB_BYTES) {
     throw new Error(
-      `画像サイズが Bluesky の上限(1MB)を超えています (${bytes.length} bytes): ${imageUrl}`
+      `画像サイズが Bluesky の上限(${BLUESKY_MAX_BLOB_BYTES} bytes)を超えています (${bytes.length} bytes): ${imageUrl}`
     );
   }
-  const res = UrlFetchApp.fetch(`${BSKY_SERVICE}/xrpc/com.atproto.repo.uploadBlob`, {
+  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.repo.uploadBlob`, {
     method: "post",
     contentType: mime,
     headers: { Authorization: "Bearer " + account.accessJwt },
     payload: bytes,
     muteHttpExceptions: true,
   });
-  if (res.getResponseCode() === 401) {
-    throw new BlueskyAuthError("uploadBlob が 401");
+  if (isExpiredAuthResponse(res)) {
+    throw new BlueskyAuthError("uploadBlob が失効応答");
   }
   const data = JSON.parse(res.getContentText());
   if (!data.blob) {
@@ -180,6 +182,7 @@ function createRecordRequest(
 function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]): string {
   let embed: any = undefined;
   if (images.length) {
+    // alt テキストはデータモデル（PostRow）に持っていないため空で送る（v2 で列追加を検討）
     const uploaded = images.map((url) => ({ alt: "", image: uploadBlueskyBlob(account, url) }));
     embed = { $type: "app.bsky.embed.images", images: uploaded };
   }
@@ -189,7 +192,9 @@ function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]):
   }
   const data = JSON.parse(res.getContentText());
   if (!data.uri) {
-    throw new Error(`Bluesky 投稿に失敗しました: ${JSON.stringify(data)}`);
+    throw new Error(
+      `Bluesky 投稿に失敗しました (${account.accountId}): ${JSON.stringify(data)}`
+    );
   }
   return data.uri;
 }
@@ -201,7 +206,7 @@ function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]):
  * @return 投稿の AT URI（例: at://did:plc:xxxx/app.bsky.feed.post/xxxx）
  */
 export function postToBluesky(accountId: string, text: string, mediaUrls?: string[]): string {
-  const images = (mediaUrls || []).filter((u) => u && String(u).trim());
+  const images = filterImageUrls(mediaUrls);
   if (images.length > BLUESKY_MAX_IMAGES) {
     throw new Error(`Bluesky は画像 ${BLUESKY_MAX_IMAGES} 枚までです（${images.length} 枚指定）`);
   }

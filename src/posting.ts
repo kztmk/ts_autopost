@@ -11,7 +11,7 @@ import {
 import { postToBluesky } from "./api/blueskyAuth";
 import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
-import { logErrorToSheet, safeJsonParse } from "./utils";
+import { logErrorToSheet } from "./utils";
 import { PostRow, Platform } from "./types";
 
 const MAX_POSTS_PER_RUN = 20;
@@ -34,9 +34,29 @@ function isQueued(row: PostRow): boolean {
   return (status === "queued" || status === "") && !row.postId;
 }
 
+/**
+ * mediaUrls 列（JSON 配列文字列）を厳格にパースする。
+ * 破損 JSON を [] に黙殺すると「画像付きのはずが画像なしで成功」する
+ * サイレント経路になるため、不正なら throw して failed + Errors 記録に乗せる。
+ */
+function parseMediaUrls(raw: string): string[] {
+  const s = String(raw ?? "").trim();
+  if (!s) return [];
+  let parsed: any;
+  try {
+    parsed = JSON.parse(s);
+  } catch (e) {
+    throw new Error(`mediaUrls が不正な JSON です: ${s}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`mediaUrls は JSON 配列である必要があります: ${s}`);
+  }
+  return parsed.map((u) => String(u));
+}
+
 /** Post を該当 Platform へ投稿し、公開後の投稿 ID を返す */
 function publishPost(post: PostRow): string {
-  const mediaUrls = safeJsonParse<string[]>(post.mediaUrls, []);
+  const mediaUrls = parseMediaUrls(post.mediaUrls);
   if (post.platform === "bluesky") return postToBluesky(post.accountId, post.contents, mediaUrls);
   if (post.platform === "threads") return postToThreads(post.accountId, post.contents, mediaUrls);
   throw new Error(`Unsupported platform: ${post.platform}`);

@@ -221,15 +221,12 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
         }
       case "insights":
-        switch (action) {
-          case "account":
-            return jsonSuccess(getAccountInsights(requestData));
-          case "refresh":
-            runEngagementUpdateOnce();
-            return jsonSuccess({ status: "started" });
-          default:
-            return jsonError(`Invalid action '${action}' for target 'insights'`, 400);
+        // account（読み取り）は GET 側で提供する。ここは更新系のみ。
+        if (action === "refresh") {
+          runEngagementUpdateOnce();
+          return jsonSuccess({ status: "started" });
         }
+        return jsonError(`Invalid action '${action}' for target 'insights'`, 400);
       case "archive":
         if (action === "run") {
           return jsonSuccess(archiveSheet(requestData.source, requestData.filename), 201);
@@ -306,6 +303,17 @@ export function doGet(
       case "threadsAuth":
         if (action === "fetch") return jsonSuccess(getThreadsAuthAll());
         return jsonError(`Invalid action '${action}' for target 'threadsAuth'`, 400);
+      case "insights":
+        // アカウント全体の現在値（オンデマンド GET）。platform/accountId はクエリで受け取る。
+        if (action === "account") {
+          return jsonSuccess(
+            getAccountInsights({
+              platform: e?.parameter?.platform,
+              accountId: e?.parameter?.accountId,
+            })
+          );
+        }
+        return jsonError(`Invalid action '${action}' for target 'insights' in GET request`, 400);
       default:
         return jsonError(`Invalid target '${target}' in GET request`, 400);
     }

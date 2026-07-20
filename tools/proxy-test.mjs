@@ -197,6 +197,25 @@ async function cmdBadSig(uid, secret) {
   await cmdSignedGet(uid, secret + "_tampered", "postData");
 }
 
+async function cmdAccountInsights(uid, secret, platform, accountId) {
+  // 署名付き GET（target=insights, action=account）に platform/accountId クエリを載せる
+  const params = new URLSearchParams();
+  params.set("action", "account");
+  params.set("target", "insights");
+  params.set("platform", platform);
+  params.set("accountId", accountId);
+  const bodyForSignature = createQuerySignatureBody(params);
+  const auth = createProxyAuthPayload(secret, uid, "account", "insights", bodyForSignature);
+  params.set("uid", auth.uid);
+  params.set("timestamp", auth.timestamp);
+  params.set("signature", auth.signature);
+  params.set("requestId", auth.requestId);
+  const url = new URL(requireUrl());
+  params.forEach((v, k) => url.searchParams.append(k, v));
+  const res = await fetch(url, { method: "GET", redirect: "follow" });
+  await printResponse(res);
+}
+
 async function cmdNoAuth(target = "postData") {
   // 認証情報を一切付けずに保護ルートを GET する。401 で拒否されるのが正常。
   const url = new URL(requireUrl());
@@ -215,6 +234,7 @@ const run = {
   "signed-post": () => cmdSignedPost(args[0], args[1], args[2], args[3], args[4]),
   "bad-sig": () => cmdBadSig(args[0], args[1]),
   "no-auth": () => cmdNoAuth(args[0]),
+  "account-insights": () => cmdAccountInsights(args[0], args[1], args[2], args[3]),
 };
 
 if (!cmd || !run[cmd]) {

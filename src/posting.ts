@@ -4,7 +4,8 @@
 
 import {
   readPostRows,
-  movePostToPosted,
+  appendToPosted,
+  deletePostRow,
   markPostFailed,
   updatePostStatus,
   fetchPostedData,
@@ -14,6 +15,9 @@ import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
 import { logErrorToSheet } from "./utils";
 import { PostRow, Platform } from "./types";
+
+/** シート行番号付きの Post 行（readPostRows の戻り値） */
+type PostRowWithIndex = PostRow & { __row: number };
 
 const MAX_POSTS_PER_RUN = 20;
 const LOCK_WAIT_MS = 0; // 取れなければ次のトリガー実行に任せる
@@ -39,7 +43,7 @@ const PLATFORM_HANDLERS: { [P in Platform]: PlatformHandler } = {
         post.accountId,
         post.contents,
         mediaUrls,
-        parentPostId ? getBlueskyReplyRef(post.accountId, parentPostId) : undefined
+        parentPostId ? getBlueskyReplyRef(parentPostId) : undefined
       ),
   },
   threads: {
@@ -121,11 +125,11 @@ class ThreadsQuotaTracker {
  * バッチ内に親がいる子は、その親より後に処理されるようにする。
  * 深さ = due 内をたどれる祖先の数。祖先が既に Posted 済み（due 外）なら深さに数えない。
  */
-function orderByReplyChain(due: PostRow[]): PostRow[] {
-  const byId: { [id: string]: PostRow } = {};
+function orderByReplyChain(due: PostRowWithIndex[]): PostRowWithIndex[] {
+  const byId: { [id: string]: PostRowWithIndex } = {};
   due.forEach((p) => (byId[p.id] = p));
   const depthCache: { [id: string]: number } = {};
-  function depth(p: PostRow, seen: { [id: string]: boolean }): number {
+  function depth(p: PostRowWithIndex, seen: { [id: string]: boolean }): number {
     if (p.id in depthCache) return depthCache[p.id];
     if (!p.inReplyTo || !(p.inReplyTo in byId) || seen[p.id]) {
       depthCache[p.id] = 0;
@@ -272,15 +276,24 @@ export function autoPost(): void {
 
     const parentResolver = new ParentResolver(allPosts, fetchPostedData());
     const quotaTracker = new ThreadsQuotaTracker();
-    let processed = 0;
 
+    // 行削除による行番号ズレを補正する（ループ内で全行を読み直さず status/削除を行うため）。
+    // 削除は「その行より上の削除件数」だけ現在行番号を押し上げる。
+    const deletedOriginalRows: number[] = [];
+    const currentRow = (originalRow: number): number => {
+      let offset = 0;
+      for (const d of deletedOriginalRows) if (d < originalRow) offset++;
+      return originalRow - offset;
+    };
+
+    let processed = 0;
     for (const post of due) {
       if (processed >= MAX_POSTS_PER_RUN) break;
 
       const parent = parentResolver.resolve(post);
       if (parent.status === "wait") continue; // queued のまま次回へ（親の解決待ち）
       if (parent.status === "broken") {
-        markPostFailed(post.id, parent.reason);
+        markPostFailed(post.id, parent.reason, currentRow(post.__row));
         logErrorToSheet(
           { message: parent.reason, detail: `platform=${post.platform} postId=${post.id}` },
           "autoPost/thread"
@@ -290,7 +303,7 @@ export function autoPost(): void {
       if (quotaTracker.shouldDefer(post)) continue; // queued のまま次回へ
 
       processed++;
-      updatePostStatus(post.id, "processing");
+      updatePostStatus(post.id, "processing", undefined, currentRow(post.__row));
       try {
         const parentPostId = parent.status === "ready" ? parent.parentPostId : undefined;
         const mediaUrls = parseMediaUrls(post.mediaUrls);
@@ -300,9 +313,11 @@ export function autoPost(): void {
           parentPostId
         );
         quotaTracker.consume(post);
-        parentResolver.recordPublished(post, platformPostId);
+        parentResolver.recordPublished(post, platformPostId); // 移送前に記録（子の連鎖用）
         try {
-          movePostToPosted(post, platformPostId);
+          appendToPosted(post, platformPostId);
+          deletePostRow(currentRow(post.__row));
+          deletedOriginalRows.push(post.__row);
         } catch (moveError: any) {
           // 投稿自体は成功している。processing のまま残し、再投稿はしない。
           logErrorToSheet(
@@ -315,7 +330,7 @@ export function autoPost(): void {
           );
         }
       } catch (e: any) {
-        markPostFailed(post.id, e.message);
+        markPostFailed(post.id, e.message, currentRow(post.__row));
         logErrorToSheet(
           {
             message: e.message,

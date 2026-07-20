@@ -7,6 +7,7 @@ import {
   initializeProxyAuth,
   getSecurityStatus,
   generateSetupCode,
+  clearProxyAuth,
 } from "./security";
 import {
   createBlueskyAuth,
@@ -137,6 +138,16 @@ export function showSetupCodeDialog(): void {
 export function setup_generateSetupCode(): void {
   const code = generateSetupCode();
   Logger.log("本人確認コード（10分間有効・アプリの接続画面に入力）: " + code);
+}
+
+/**
+ * 【エディタ実行用】Proxy 認可の紐付けをリセットする。
+ * 本番フロント（実 Firebase uid）で初期化し直す前に、テスト uid の紐付けを解除する。
+ * 実行後は本人確認コードを生成し直してフロントで再初期化すること。
+ */
+export function setup_resetProxyAuth(): void {
+  const r = clearProxyAuth();
+  Logger.log(`Proxy 認可をリセットしました（旧 ownerUid: ${r.previousOwnerUid || "なし"}）。`);
 }
 
 /**

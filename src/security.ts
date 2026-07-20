@@ -58,6 +58,21 @@ export function generateSetupCode(): string {
   return code;
 }
 
+/**
+ * Proxy 認可の紐付け（ownerUid / proxySecret / initializedAt）をリセットする。
+ * 別の Firebase uid（本番フロント）で再初期化したいときに使う。
+ * @return リセット前の ownerUid（マスク）
+ */
+export function clearProxyAuth(): { previousOwnerUid: string } {
+  const properties = PropertiesService.getScriptProperties();
+  const prev = properties.getProperty(SECURITY_PROP_KEYS.ownerUid) || "";
+  properties.deleteProperty(SECURITY_PROP_KEYS.ownerUid);
+  properties.deleteProperty(SECURITY_PROP_KEYS.proxySecret);
+  properties.deleteProperty(SECURITY_PROP_KEYS.initializedAt);
+  clearSetupCode(properties);
+  return { previousOwnerUid: prev ? maskValue(prev) : "" };
+}
+
 export function getSecurityStatus() {
   const properties = PropertiesService.getScriptProperties();
   const allProps = properties.getProperties();

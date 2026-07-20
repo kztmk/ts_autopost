@@ -72,6 +72,19 @@ export interface PostInput {
   inReplyTo?: string;
 }
 
+/**
+ * 投稿単位のエンゲージメント（Posted シートの列に対応）。
+ * Bluesky は views/shares を持たないため 0 になる。
+ */
+export interface Engagement {
+  views: number;
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+  shares: number;
+}
+
 /** Errors シートの 1 行（Post に限らない汎用エラーログ） */
 export interface ErrorLogEntry {
   timestamp?: string;

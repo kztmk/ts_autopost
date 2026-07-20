@@ -3,7 +3,7 @@
 // トークン延命はオンデマンド回復（投稿時に失効検知 → refresh → だめなら再ログイン）で行う
 // （development-plan.md Phase 2 / トークン更新方針）。
 
-import { BlueskyAccount } from "../types";
+import { BlueskyAccount, Engagement } from "../types";
 import { maskSensitive, fetchWithRetries, requireNonEmptyString, filterImageUrls } from "../utils";
 
 const BSKY_SERVICE = "https://bsky.social";
@@ -346,4 +346,52 @@ export function deleteBlueskyAuth(data: any) {
   const accountId = requireNonEmptyString(data?.accountId, "accountId");
   PropertiesService.getScriptProperties().deleteProperty(accountKey(accountId));
   return { accountId, deleted: true };
+}
+
+// ---- エンゲージメント（公開 API、認証不要）----
+
+const BSKY_PUBLIC = "https://public.api.bsky.app";
+
+/**
+ * 投稿単位のエンゲージメントを公開 API から取得する（認証不要）。
+ * Bluesky に views/shares は無いため 0。
+ * @param uri 投稿の AT URI（postId 列）
+ */
+export function getBlueskyPostEngagement(uri: string): Engagement {
+  const res = fetchWithRetries(
+    `${BSKY_PUBLIC}/xrpc/app.bsky.feed.getPosts?uris=${encodeURIComponent(uri)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  const post = data.posts && data.posts[0];
+  if (!post) {
+    throw new Error(`Bluesky 投稿の取得に失敗 (${uri}): ${JSON.stringify(data)}`);
+  }
+  return {
+    views: 0,
+    likes: post.likeCount || 0,
+    replies: post.replyCount || 0,
+    reposts: post.repostCount || 0,
+    quotes: post.quoteCount || 0,
+    shares: 0,
+  };
+}
+
+/** アカウント全体の現在プロフィール指標（フォロワー数等）を取得する（公開 API） */
+export function getBlueskyAccountInsights(accountId: string): { [key: string]: number } {
+  const account = loadBlueskyAccount(accountId);
+  const actor = account.did || account.handle;
+  const res = fetchWithRetries(
+    `${BSKY_PUBLIC}/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(actor)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  if (!data.did) {
+    throw new Error(`Bluesky プロフィール取得に失敗 (${actor}): ${JSON.stringify(data)}`);
+  }
+  return {
+    followers_count: data.followersCount || 0,
+    follows_count: data.followsCount || 0,
+    posts_count: data.postsCount || 0,
+  };
 }

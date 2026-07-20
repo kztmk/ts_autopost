@@ -8,7 +8,7 @@
 // 延命は日次メンテナンストリガー（threadsTokenMaintenance）が、発行から
 // REFRESH_AFTER_DAYS 経過したトークンのみ th_refresh_token でリフレッシュする。
 
-import { ThreadsAccount } from "../types";
+import { ThreadsAccount, Engagement } from "../types";
 import {
   maskSensitive,
   fetchWithRetries,
@@ -596,4 +596,60 @@ export function getThreadsRemainingQuota(accountId: string): number {
     Logger.log(`getThreadsRemainingQuota: 判定不能につき投稿を試行 (${accountId}): ${e.message}`);
     return Infinity;
   }
+}
+
+// ---- エンゲージメント（インサイト）----
+
+const THREADS_POST_METRICS = "views,likes,replies,reposts,quotes,shares";
+const THREADS_ACCOUNT_METRICS = "views,likes,replies,reposts,quotes,followers_count";
+
+/** insights レスポンス（{data:[{name, values:[{value}]}]}）を {name: value} に畳む */
+function foldInsights(data: any): { [key: string]: number } {
+  const out: { [key: string]: number } = {};
+  (data.data || []).forEach((item: any) => {
+    const v = item.values && item.values[0] ? item.values[0].value : item.total_value?.value;
+    out[item.name] = typeof v === "number" ? v : 0;
+  });
+  return out;
+}
+
+/**
+ * 投稿単位のエンゲージメントを取得する。
+ * @param mediaId 公開後の Threads Media ID（postId 列）
+ */
+export function getThreadsPostInsights(accountId: string, mediaId: string): Engagement {
+  const account = loadAuthorizedThreadsAccount(accountId);
+  const res = fetchWithRetries(
+    `${THREADS_GRAPH_V1}/${encodeURIComponent(mediaId)}/insights` +
+      `?metric=${THREADS_POST_METRICS}&access_token=${encodeURIComponent(account.accessToken)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  if (!data.data) {
+    throw new Error(`Threads インサイト取得に失敗 (${mediaId}): ${JSON.stringify(data)}`);
+  }
+  const m = foldInsights(data);
+  return {
+    views: m.views || 0,
+    likes: m.likes || 0,
+    replies: m.replies || 0,
+    reposts: m.reposts || 0,
+    quotes: m.quotes || 0,
+    shares: m.shares || 0,
+  };
+}
+
+/** アカウント全体の現在インサイトを取得する（オンデマンド。フォロワー数等） */
+export function getThreadsAccountInsights(accountId: string): { [key: string]: number } {
+  const account = loadAuthorizedThreadsAccount(accountId);
+  const res = fetchWithRetries(
+    `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_insights` +
+      `?metric=${THREADS_ACCOUNT_METRICS}&access_token=${encodeURIComponent(account.accessToken)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  if (!data.data) {
+    throw new Error(`Threads アカウントインサイト取得に失敗: ${JSON.stringify(data)}`);
+  }
+  return foldInsights(data);
 }

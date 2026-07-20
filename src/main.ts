@@ -27,8 +27,12 @@ import {
   createPostingTrigger,
   deletePostingTriggers,
   checkTriggerExists,
+  ensureEngagementTrigger,
+  deleteEngagementTrigger,
   POSTING_HANDLER,
 } from "./api/triggers";
+import { getAccountInsights, runEngagementUpdateOnce } from "./insights";
+import { archiveSheet } from "./api/archive";
 import {
   createThreadsAuth,
   getThreadsAuthAll,
@@ -209,9 +213,28 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonSuccess(ensureThreadsMaintenanceTrigger(), 201);
           case "deleteMaintenance":
             return jsonSuccess(deleteThreadsMaintenanceTrigger());
+          case "ensureEngagement":
+            return jsonSuccess(ensureEngagementTrigger(), 201);
+          case "deleteEngagement":
+            return jsonSuccess(deleteEngagementTrigger());
           default:
             return jsonError(`Invalid action '${action}' for target 'trigger'`, 400);
         }
+      case "insights":
+        switch (action) {
+          case "account":
+            return jsonSuccess(getAccountInsights(requestData));
+          case "refresh":
+            runEngagementUpdateOnce();
+            return jsonSuccess({ status: "started" });
+          default:
+            return jsonError(`Invalid action '${action}' for target 'insights'`, 400);
+        }
+      case "archive":
+        if (action === "run") {
+          return jsonSuccess(archiveSheet(requestData.source, requestData.filename), 201);
+        }
+        return jsonError(`Invalid action '${action}' for target 'archive'`, 400);
       case "threadsAuth":
         switch (action) {
           case "create":

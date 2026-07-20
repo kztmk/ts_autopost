@@ -22,7 +22,9 @@ import {
 const THREADS_GRAPH = "https://graph.threads.net";
 const THREADS_GRAPH_V1 = "https://graph.threads.net/v1.0";
 const THREADS_AUTHORIZE_URL = "https://threads.net/oauth/authorize";
-const THREADS_SCOPES = "threads_basic,threads_content_publish,threads_manage_insights";
+// threads_manage_replies はリプライ（スレッド連投）作成に必須（無いと code 10 権限エラー）。
+const THREADS_SCOPES =
+  "threads_basic,threads_content_publish,threads_manage_insights,threads_manage_replies";
 const THREADS_ACCOUNT_PREFIX = "THREADS_ACCOUNT_";
 const OAUTH_STATE_CACHE_PREFIX = "threads_oauth_state_";
 const OAUTH_STATE_TTL_SECONDS = 10 * 60;
@@ -498,25 +500,36 @@ function publishThreadsContainer(
 }
 
 /**
- * Threads に投稿する（テキスト、任意で画像）。
+ * Threads に投稿する（テキスト、任意で画像、任意でスレッドリプライ）。
  * 画像 0 枚 = TEXT、1 枚 = IMAGE、2 枚以上 = CAROUSEL。
+ * replyToId を渡すと、その Media ID への返信（reply_to_id）としてトップレベルコンテナを作る。
  * @return 公開後の Threads Media ID
  */
-export function postToThreads(accountId: string, text: string, mediaUrls?: string[]): string {
+export function postToThreads(
+  accountId: string,
+  text: string,
+  mediaUrls?: string[],
+  replyToId?: string
+): string {
   const account = loadAuthorizedThreadsAccount(accountId);
   const images = filterImageUrls(mediaUrls);
+  // reply_to_id はトップレベルコンテナ（TEXT/IMAGE/CAROUSEL 本体）にのみ付ける。
+  // カルーセルの子アイテムには付けない。
+  const replyField: { [key: string]: string } = replyToId ? { reply_to_id: replyToId } : {};
 
   let containerId: string;
   if (images.length === 0) {
     containerId = createThreadsMediaContainer(account, "Threads コンテナ作成", {
       media_type: "TEXT",
       text,
+      ...replyField,
     });
   } else if (images.length === 1) {
     containerId = createThreadsMediaContainer(account, "Threads 画像コンテナ作成", {
       media_type: "IMAGE",
       image_url: images[0],
       text,
+      ...replyField,
     });
   } else {
     if (images.length > THREADS_MAX_CAROUSEL) {
@@ -535,6 +548,7 @@ export function postToThreads(accountId: string, text: string, mediaUrls?: strin
       media_type: "CAROUSEL",
       children: childIds.join(","),
       text,
+      ...replyField,
     });
   }
 

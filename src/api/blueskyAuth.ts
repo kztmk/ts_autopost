@@ -257,19 +257,16 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
 
 /**
  * 親投稿の AT URI から、子のリプライに使う root/parent 参照（uri+cid）を得る。
- * getRecord は PDS の即時整合な読み取りなので、同一ラン内で直前に作った親でも参照できる
- * （appview のインデックス遅延を避ける）。親自身が返す reply.root からスレッド root を導く。
+ * getRecord は PDS の即時整合な公開読み取りなので、同一ラン内で直前に作った親でも参照でき
+ * （appview のインデックス遅延を避ける）、認証不要（accessJwt 失効の影響を受けない）。
+ * 親自身が返す reply.root からスレッド root を導く。
  */
-export function getBlueskyReplyRef(accountId: string, parentUri: string): BlueskyReplyRef {
-  const account = loadBlueskyAccount(accountId);
+export function getBlueskyReplyRef(parentUri: string): BlueskyReplyRef {
   const { repo, collection, rkey } = parseAtUri(parentUri);
   const url =
     `${BSKY_SERVICE}/xrpc/com.atproto.repo.getRecord` +
     `?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`;
-  const res = fetchWithRetries(url, {
-    headers: account.accessJwt ? { Authorization: "Bearer " + account.accessJwt } : undefined,
-    muteHttpExceptions: true,
-  });
+  const res = fetchWithRetries(url, { muteHttpExceptions: true });
   const data = JSON.parse(res.getContentText());
   if (!data.uri || !data.cid) {
     throw new Error(`親投稿(getRecord)の取得に失敗: ${parentUri}: ${JSON.stringify(data)}`);

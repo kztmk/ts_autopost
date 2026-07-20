@@ -125,21 +125,34 @@ export function deletePost(data: any) {
   return { id, deleted: deleted > 0 };
 }
 
-/** id 一致の Posts 行の status（と任意で errorMessage）を更新する */
-export function updatePostStatus(id: string, status: string, errorMessage?: string): void {
+/**
+ * Posts 行の status（と任意で errorMessage）を更新する。
+ * rowIndex を渡すと全行読み込みによる再検索を省く（呼び出し側がその時点で正しい
+ * シート行番号を保証できる場合。autoPost は削除によるズレを補正して渡す）。
+ */
+export function updatePostStatus(
+  id: string,
+  status: string,
+  errorMessage?: string,
+  rowIndex?: number
+): void {
   const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
   const map = indexMap(HEADERS.POST_HEADERS);
-  const target = readPostRows().find((r) => String(r.id) === String(id));
-  if (!target) return;
-  sheet.getRange(target.__row, map["status"] + 1).setValue(status);
+  let row = rowIndex;
+  if (row === undefined) {
+    const target = readPostRows().find((r) => String(r.id) === String(id));
+    if (!target) return;
+    row = target.__row;
+  }
+  sheet.getRange(row, map["status"] + 1).setValue(status);
   if (errorMessage !== undefined) {
-    sheet.getRange(target.__row, map["errorMessage"] + 1).setValue(errorMessage);
+    sheet.getRange(row, map["errorMessage"] + 1).setValue(errorMessage);
   }
 }
 
-/** id 一致の Posts 行を failed にし、エラーを記録する */
-export function markPostFailed(id: string, errorMessage: string): void {
-  updatePostStatus(id, "failed", errorMessage);
+/** Posts 行を failed にし、エラーを記録する（rowIndex 指定で再検索を省ける） */
+export function markPostFailed(id: string, errorMessage: string, rowIndex?: number): void {
+  updatePostStatus(id, "failed", errorMessage, rowIndex);
 }
 
 /**
@@ -220,17 +233,21 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
 }
 
 /**
- * 投稿成功した Post を Posted シートへ移送する（append → Posts から削除）。
- * @param post 対象の Post
+ * 投稿成功した Post を Posted シートへ追記する（Posts からの削除はしない）。
  * @param postId 公開後のプラットフォーム投稿 ID（Threads Media ID / Bluesky AT URI）
  */
-export function movePostToPosted(post: PostRow, postId: string): void {
+export function appendToPosted(post: PostRow, postId: string): void {
   const { sheet: posted } = ensureSheet(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
   const now = new Date().toISOString();
   const source: any = { ...post, postedAt: now, postId };
   const row = HEADERS.POSTED_HEADERS.map((h) => source[h] ?? "");
   posted.appendRow(row);
-  deletePostsByIds([post.id]);
+}
+
+/** Posts シートの 1 行を行番号で削除する（削除すると以降の行番号は 1 つ上にずれる） */
+export function deletePostRow(rowIndex: number): void {
+  const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
+  sheet.deleteRow(rowIndex);
 }
 
 function stripRowNumber(rows: any[]): any[] {
@@ -252,19 +269,26 @@ export function readPostedRows(): any[] {
 
 /**
  * Posted シートの指定 id 行にエンゲージメントと更新日時を書き込む。
- * @param rowIndex 対象のシート行番号（readPostedRows の __row）
+ * 書き込み直前に id で行を再検索するため、並行してアーカイブ（シート削除・再作成）が
+ * 走っても無関係な行へ書き込まない（見つからなければ何もしない）。
+ * @return 書き込んだら true、対象行が見つからなければ false
  */
 export function writePostedEngagement(
-  rowIndex: number,
+  id: string,
   eng: { views: number; likes: number; replies: number; reposts: number; quotes: number; shares: number }
-): void {
+): boolean {
   const { sheet } = ensureSheet(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
   const map = indexMap(HEADERS.POSTED_HEADERS);
+  const target = readSheetRows(SHEETS.POSTED, HEADERS.POSTED_HEADERS).find(
+    (r) => String(r.id) === String(id)
+  );
+  if (!target) return false;
   // views〜shares は連続列なのでまとめて書き、更新日時を別途書く
   sheet
-    .getRange(rowIndex, map["views"] + 1, 1, 6)
+    .getRange(target.__row, map["views"] + 1, 1, 6)
     .setValues([[eng.views, eng.likes, eng.replies, eng.reposts, eng.quotes, eng.shares]]);
-  sheet.getRange(rowIndex, map["insightsUpdatedAt"] + 1).setValue(new Date().toISOString());
+  sheet.getRange(target.__row, map["insightsUpdatedAt"] + 1).setValue(new Date().toISOString());
+  return true;
 }
 
 /** Errors シートの全行を返す（API 用） */

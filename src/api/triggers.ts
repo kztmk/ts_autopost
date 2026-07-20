@@ -10,6 +10,27 @@ const TRIGGER_INTERVAL_PREFIX = "triggerInterval_";
 // それ以外を渡すと「既存トリガー削除後に作成で例外 → トリガー消失」になるため事前検証する。
 const VALID_INTERVALS = [1, 5, 10, 15, 30];
 
+/**
+ * ハンドラ名のトリガーが無ければ日次で作成する（存在確認と作成を ScriptLock で原子化し、
+ * 同時リクエストによる重複作成を防ぐ）。
+ */
+function ensureDailyTrigger(handler: string) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    throw new Error(`トリガー作成のロックを取得できませんでした: ${handler}`);
+  }
+  try {
+    const exists = ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === handler);
+    if (exists) {
+      return { functionName: handler, created: false, exists: true };
+    }
+    ScriptApp.newTrigger(handler).timeBased().everyDays(1).create();
+    return { functionName: handler, created: true, exists: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /** triggerInterval_* プロパティをすべて削除する（トリガー削除・作り直しの際の掃除） */
 function cleanupTriggerIntervalProps(): void {
   const props = PropertiesService.getScriptProperties();
@@ -62,14 +83,7 @@ export function deletePostingTriggers() {
 
 /** エンゲージメント日次更新トリガー（updateAllEngagement）が無ければ作成する */
 export function ensureEngagementTrigger() {
-  const exists = ScriptApp.getProjectTriggers().some(
-    (t) => t.getHandlerFunction() === ENGAGEMENT_HANDLER
-  );
-  if (exists) {
-    return { functionName: ENGAGEMENT_HANDLER, created: false, exists: true };
-  }
-  ScriptApp.newTrigger(ENGAGEMENT_HANDLER).timeBased().everyDays(1).create();
-  return { functionName: ENGAGEMENT_HANDLER, created: true, exists: true };
+  return ensureDailyTrigger(ENGAGEMENT_HANDLER);
 }
 
 /** エンゲージメント日次更新トリガーを削除する */

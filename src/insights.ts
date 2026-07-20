@@ -26,7 +26,11 @@ function getPostEngagement(platform: Platform, accountId: string, postId: string
  */
 export function updateAllEngagement(): void {
   const startMs = Date.now();
-  const rows = readPostedRows();
+  // 更新が古い行（未更新は最古扱い）から処理する。時間予算で中断しても、
+  // 次回実行では前回更新できなかった行が先頭に来るので、全行が順に更新される。
+  const rows = readPostedRows().sort((a: any, b: any) =>
+    String(a.insightsUpdatedAt || "").localeCompare(String(b.insightsUpdatedAt || ""))
+  );
   let updated = 0;
   let skipped = 0;
 
@@ -42,7 +46,8 @@ export function updateAllEngagement(): void {
     }
     try {
       const eng = getPostEngagement(platform, row.accountId, postId);
-      writePostedEngagement(row.__row, eng);
+      // 書き込みは id で行を再検索する（並行アーカイブでのシート差し替えに対して安全）
+      writePostedEngagement(String(row.id), eng);
       updated++;
     } catch (e: any) {
       skipped++;

@@ -54,11 +54,12 @@ export function archiveSheet(source: string, filename: string) {
     throw new Error(`filename に使えない文字が含まれています（: \\ / ? * [ ] は不可）: ${newSheetName}`);
   }
 
+  // autoPost / updateAllEngagement と同じ ScriptLock を取り、コピー〜元シート削除の間に
+  // Posted への投稿追記・エンゲージメント更新が発生して取りこぼされるのを防ぐ。
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) {
     throw new Error("アーカイブ処理のロックを取得できませんでした。しばらく後に再試行してください。");
   }
-
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sourceSheet = ss.getSheetByName(sourceName);

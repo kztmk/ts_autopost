@@ -83,6 +83,26 @@ export function initializeProxyAuth(requestData: InitializeRequest) {
   const uid = normalizeRequiredString(requestData.uid, "uid");
   const setupCode = normalizeRequiredString(requestData.setupCode, "setupCode");
   const properties = PropertiesService.getScriptProperties();
+
+  // 同一 setup code での並行初期化を直列化する。ロック内で読み直すことで、
+  // 先行した初期化が setup code を消費済みなら後続はクリーンにエラーになる
+  // （異なる proxySecret を返して片方が無効化される競合を防ぐ）。
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error("初期化のロックを取得できませんでした。しばらく後に再試行してください。");
+  }
+  try {
+    return initializeProxyAuthLocked(uid, setupCode, properties);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function initializeProxyAuthLocked(
+  uid: string,
+  setupCode: string,
+  properties: GoogleAppsScript.Properties.Properties
+) {
   const allProps = properties.getProperties();
   const existingOwnerUid = allProps[SECURITY_PROP_KEYS.ownerUid];
   const setupState = getSetupCodeState(allProps);
@@ -487,11 +507,20 @@ function assertNotReplay(requestId: string): void {
   const cacheKey = `security_request_${sha256Base64(normalizedRequestId)}`;
   const cache = CacheService.getScriptCache();
 
-  if (cache.get(cacheKey)) {
-    throw new Error("Duplicate request detected.");
+  // cache.get→put を DocumentLock で原子化し、同一署名の並行リクエストが
+  // 両方通過して二重実行されるのを防ぐ。ScriptLock ではなく DocumentLock を使うのは、
+  // 投稿ループ（autoPost）が長時間 ScriptLock を保持している間もリクエスト受付を
+  // ブロックしないため（DocumentLock は独立）。
+  const lock = LockService.getDocumentLock();
+  const locked = lock.tryLock(5000);
+  try {
+    if (cache.get(cacheKey)) {
+      throw new Error("Duplicate request detected.");
+    }
+    cache.put(cacheKey, "1", REPLAY_CACHE_TTL_SECONDS);
+  } finally {
+    if (locked) lock.releaseLock();
   }
-
-  cache.put(cacheKey, "1", REPLAY_CACHE_TTL_SECONDS);
 }
 
 function createRandomCode(): string {

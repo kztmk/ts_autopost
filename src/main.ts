@@ -189,7 +189,11 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
           case "createMultiple":
             return jsonSuccess(createMultiplePosts(requestData.posts || requestData), 201);
           case "updateInReplyTo":
-            return jsonSuccess(updateInReplyTo(requestData.threads || requestData));
+            // ペイロードキーは updates を第一候補とする（threads は x_Autopost API 互換。
+            // Platform 名 "threads" と紛らわしいため新規利用では updates を使うこと）。
+            return jsonSuccess(
+              updateInReplyTo(requestData.updates || requestData.threads || requestData)
+            );
           case "delete":
             return jsonSuccess(deletePost(requestData));
           default:

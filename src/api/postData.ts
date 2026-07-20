@@ -245,6 +245,28 @@ export function fetchPostedData(): any[] {
   return stripRowNumber(readSheetRows(SHEETS.POSTED, HEADERS.POSTED_HEADERS));
 }
 
+/** Posted シートの全行を返す（+ シート行番号 __row。エンゲージメント更新用） */
+export function readPostedRows(): any[] {
+  return readSheetRows(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
+}
+
+/**
+ * Posted シートの指定 id 行にエンゲージメントと更新日時を書き込む。
+ * @param rowIndex 対象のシート行番号（readPostedRows の __row）
+ */
+export function writePostedEngagement(
+  rowIndex: number,
+  eng: { views: number; likes: number; replies: number; reposts: number; quotes: number; shares: number }
+): void {
+  const { sheet } = ensureSheet(SHEETS.POSTED, HEADERS.POSTED_HEADERS);
+  const map = indexMap(HEADERS.POSTED_HEADERS);
+  // views〜shares は連続列なのでまとめて書き、更新日時を別途書く
+  sheet
+    .getRange(rowIndex, map["views"] + 1, 1, 6)
+    .setValues([[eng.views, eng.likes, eng.replies, eng.reposts, eng.quotes, eng.shares]]);
+  sheet.getRange(rowIndex, map["insightsUpdatedAt"] + 1).setValue(new Date().toISOString());
+}
+
 /** Errors シートの全行を返す（API 用） */
 export function fetchErrorData(): any[] {
   return stripRowNumber(readSheetRows(SHEETS.ERRORS, HEADERS.ERROR_HEADERS));

@@ -4,6 +4,7 @@ import { VERSION } from "../constants";
 import { deleteTriggersByHandler } from "../utils";
 
 export const POSTING_HANDLER = "autoPost";
+export const ENGAGEMENT_HANDLER = "updateAllEngagement";
 const TRIGGER_INTERVAL_PREFIX = "triggerInterval_";
 // GAS の everyMinutes が受け付ける値はこの 5 つのみ。
 // それ以外を渡すと「既存トリガー削除後に作成で例外 → トリガー消失」になるため事前検証する。
@@ -56,6 +57,24 @@ export function createPostingTrigger(data: any) {
 export function deletePostingTriggers() {
   const deleted = deleteTriggersByHandler(POSTING_HANDLER);
   cleanupTriggerIntervalProps();
+  return { status: "success", deleted };
+}
+
+/** エンゲージメント日次更新トリガー（updateAllEngagement）が無ければ作成する */
+export function ensureEngagementTrigger() {
+  const exists = ScriptApp.getProjectTriggers().some(
+    (t) => t.getHandlerFunction() === ENGAGEMENT_HANDLER
+  );
+  if (exists) {
+    return { functionName: ENGAGEMENT_HANDLER, created: false, exists: true };
+  }
+  ScriptApp.newTrigger(ENGAGEMENT_HANDLER).timeBased().everyDays(1).create();
+  return { functionName: ENGAGEMENT_HANDLER, created: true, exists: true };
+}
+
+/** エンゲージメント日次更新トリガーを削除する */
+export function deleteEngagementTrigger() {
+  const deleted = deleteTriggersByHandler(ENGAGEMENT_HANDLER);
   return { status: "success", deleted };
 }
 

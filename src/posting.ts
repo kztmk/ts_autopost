@@ -17,11 +17,41 @@ import { PostRow, Platform } from "./types";
 
 const MAX_POSTS_PER_RUN = 20;
 const LOCK_WAIT_MS = 0; // 取れなければ次のトリガー実行に任せる
-// Platform 型の全値と一致するが、シート上の不正値（手編集等）を弾くガードとして明示する。
-const SUPPORTED_PLATFORMS: Platform[] = ["bluesky", "threads"];
 // Threads クォータの安全マージン。「上限近接時は見送り」（development-plan Phase 4）の実装。
 // 残枠がこの値以下になったら投稿せず次回へ持ち越す（チェック後〜publish 間の枯渇レース対策）。
 const THREADS_QUOTA_SAFETY_MARGIN = 2;
+// inReplyTo 連鎖をたどる上限（循環・異常データからの脱出弁）
+const MAX_CHAIN_DEPTH = 100;
+
+// ---- Platform ディスパッチ ----
+// platform ごとの分岐を 1 箇所に集約する（Phase 4 レビュー指摘の対応）。
+// クォータ判定（ThreadsQuotaTracker）は Threads 固有の関心事なので別に持つ。
+
+interface PlatformHandler {
+  /** Post を公開し、公開後のプラットフォーム投稿 ID を返す */
+  publish(post: PostRow, mediaUrls: string[], parentPostId?: string): string;
+}
+
+const PLATFORM_HANDLERS: { [P in Platform]: PlatformHandler } = {
+  bluesky: {
+    publish: (post, mediaUrls, parentPostId) =>
+      postToBluesky(
+        post.accountId,
+        post.contents,
+        mediaUrls,
+        parentPostId ? getBlueskyReplyRef(post.accountId, parentPostId) : undefined
+      ),
+  },
+  threads: {
+    publish: (post, mediaUrls, parentPostId) =>
+      postToThreads(post.accountId, post.contents, mediaUrls, parentPostId),
+  },
+};
+
+/** シート上の不正値（手編集等）を弾くガード。対応 Platform はハンドラ表から導出する */
+function isSupportedPlatform(value: any): value is Platform {
+  return Object.prototype.hasOwnProperty.call(PLATFORM_HANDLERS, String(value));
+}
 
 function isDue(postSchedule: string, nowMs: number): boolean {
   if (!postSchedule) return true; // 予約日時なし = 即時
@@ -53,23 +83,6 @@ function parseMediaUrls(raw: string): string[] {
     throw new Error(`mediaUrls は JSON 配列である必要があります: ${s}`);
   }
   return parsed.map((u) => String(u));
-}
-
-/**
- * Post を該当 Platform へ投稿し、公開後の投稿 ID を返す。
- * parentPostId が渡された場合はスレッド返信として投稿する
- * （Threads: reply_to_id / Bluesky: 親 uri から root/parent 参照を解決）。
- */
-function publishPost(post: PostRow, parentPostId?: string): string {
-  const mediaUrls = parseMediaUrls(post.mediaUrls);
-  if (post.platform === "bluesky") {
-    const reply = parentPostId ? getBlueskyReplyRef(post.accountId, parentPostId) : undefined;
-    return postToBluesky(post.accountId, post.contents, mediaUrls, reply);
-  }
-  if (post.platform === "threads") {
-    return postToThreads(post.accountId, post.contents, mediaUrls, parentPostId);
-  }
-  throw new Error(`Unsupported platform: ${post.platform}`);
 }
 
 /**
@@ -132,15 +145,110 @@ type ParentResolution =
   | { status: "wait" }
   | { status: "broken"; reason: string };
 
+/** 公開済み親の参照情報（Posted 事前ロード + ラン内投稿分） */
+interface PublishedRef {
+  postId: string;
+  platform: Platform;
+  accountId: string;
+}
+
+/**
+ * 親 Post の解決を担うラン内キャッシュ。
+ * - published: Posted シートの事前ロード + このランで投稿した分を逐次追加
+ * - pending: Posts シートの全行（未投稿・失敗の親の状態参照用）
+ *
+ * セマンティクス（CONTEXT.md「Thread」/ development-plan Phase 6）:
+ * - 親子は同一 PlatformAccount（platform + accountId）でなければならない → 不一致は broken
+ * - 親が Posts に残っている（queued/processing/failed）間は wait
+ *   （failed でも wait: 親を修正して re-queue すれば子は自動再開する。「再開できる」の担保）
+ * - 親がどこにも無い（削除された）場合と循環参照は broken（子を failed 化）
+ */
+class ParentResolver {
+  private published: { [internalId: string]: PublishedRef } = {};
+  private pending: { [internalId: string]: PostRow } = {};
+
+  constructor(allPosts: PostRow[], postedRows: any[]) {
+    allPosts.forEach((p) => (this.pending[p.id] = p));
+    postedRows.forEach((r) => {
+      if (r.id && r.postId) {
+        this.published[r.id] = {
+          postId: r.postId,
+          platform: r.platform,
+          accountId: r.accountId,
+        };
+      }
+    });
+  }
+
+  /** このランで投稿した Post を記録する（同一ラン内で子が親を参照できるように） */
+  recordPublished(post: PostRow, platformPostId: string): void {
+    this.published[post.id] = {
+      postId: platformPostId,
+      platform: post.platform,
+      accountId: post.accountId,
+    };
+  }
+
+  resolve(post: PostRow): ParentResolution {
+    if (!post.inReplyTo) return { status: "root" };
+
+    // 循環検出: pending 内の祖先チェーンをたどり、再訪または深さ超過で broken
+    const seen: { [id: string]: boolean } = {};
+    let cursor = post.inReplyTo;
+    for (let i = 0; i < MAX_CHAIN_DEPTH; i++) {
+      if (seen[cursor] || cursor === post.id) {
+        return { status: "broken", reason: `inReplyTo が循環しています（${post.id} → … → ${cursor}）` };
+      }
+      seen[cursor] = true;
+      const next = this.pending[cursor];
+      if (!next || !next.inReplyTo) break;
+      cursor = next.inReplyTo;
+    }
+
+    const parentId = post.inReplyTo;
+    const published = this.published[parentId];
+    if (published) {
+      if (published.platform !== post.platform || published.accountId !== post.accountId) {
+        return {
+          status: "broken",
+          reason:
+            `親(${parentId})と PlatformAccount が異なります` +
+            `（親=${published.platform}/${published.accountId} 子=${post.platform}/${post.accountId}）`,
+        };
+      }
+      return { status: "ready", parentPostId: published.postId };
+    }
+
+    const pendingParent = this.pending[parentId];
+    if (pendingParent) {
+      if (
+        pendingParent.platform !== post.platform ||
+        pendingParent.accountId !== post.accountId
+      ) {
+        return {
+          status: "broken",
+          reason:
+            `親(${parentId})と PlatformAccount が異なります` +
+            `（親=${pendingParent.platform}/${pendingParent.accountId} 子=${post.platform}/${post.accountId}）`,
+        };
+      }
+      // queued / processing / failed のいずれでも wait。
+      // failed の親は修正・re-queue されれば次回以降のランで子が自動再開する。
+      return { status: "wait" };
+    }
+
+    return { status: "broken", reason: `親(${parentId})が見つかりません` };
+  }
+}
+
 /**
  * トリガーから呼ばれる投稿ループ。
- * 対象: status が queued/空・postId 未設定・対応 Platform・時刻到来（子行も含む）。
+ * 対象: status が queued/空・postId 未設定・対応 Platform・時刻到来（スレッド子行も含む）。
  *
  * スレッド連投:
  *  - 親（inReplyTo 先）が投稿済みになってから子を投稿する（親→子のトポロジカル順）。
- *  - 親がまだ未投稿（queued/processing）なら子は見送り、次回トリガーで再開。
- *  - 親が failed / 見つからない場合は連鎖を中断し、子も failed にする。
- *  - 連鎖は Platform ごとに独立（親子は必ず同一 Platform。異なれば中断）。
+ *  - 親が未投稿・失敗中の間は子は見送り（queued 維持）、親の解決後に自動再開。
+ *  - 親が削除済み・PlatformAccount 不一致・循環参照の場合は子を failed にする。
  *
  * 二重投稿ガード:
  *  - ScriptLock で並行実行を直列化（取れなければ即リターン）。
@@ -158,59 +266,21 @@ export function autoPost(): void {
     const allPosts = readPostRows();
     const due = orderByReplyChain(
       allPosts.filter(
-        (r) =>
-          isQueued(r) &&
-          SUPPORTED_PLATFORMS.indexOf(r.platform) !== -1 &&
-          isDue(r.postSchedule, nowMs)
+        (r) => isQueued(r) && isSupportedPlatform(r.platform) && isDue(r.postSchedule, nowMs)
       )
     );
 
-    // 親の投稿 ID 解決用。Posted 済みの投稿 ID を事前ロードし、
-    // このランで投稿した親も逐次追加する（同一ラン内で子が親を参照できるように）。
-    const resolvedPostId: { [internalId: string]: string } = {};
-    const resolvedPlatform: { [internalId: string]: Platform } = {};
-    fetchPostedData().forEach((r: any) => {
-      if (r.id && r.postId) {
-        resolvedPostId[r.id] = r.postId;
-        resolvedPlatform[r.id] = r.platform;
-      }
-    });
-    // 未投稿・失敗の親判定用に Posts 側の status も引けるようにする
-    const postsById: { [id: string]: PostRow } = {};
-    allPosts.forEach((p) => (postsById[p.id] = p));
-
-    const resolveParent = (post: PostRow): ParentResolution => {
-      if (!post.inReplyTo) return { status: "root" };
-      const parentId = post.inReplyTo;
-      if (parentId in resolvedPostId) {
-        if (resolvedPlatform[parentId] !== post.platform) {
-          return {
-            status: "broken",
-            reason: `親(${parentId})と Platform が異なります（親=${resolvedPlatform[parentId]} 子=${post.platform}）`,
-          };
-        }
-        return { status: "ready", parentPostId: resolvedPostId[parentId] };
-      }
-      const parentPending = postsById[parentId];
-      if (parentPending) {
-        if (String(parentPending.status) === "failed") {
-          return { status: "broken", reason: `親(${parentId})が failed のため連鎖を中断` };
-        }
-        return { status: "wait" }; // 親がまだ未投稿 → 次回へ
-      }
-      return { status: "broken", reason: `親(${parentId})が見つかりません` };
-    };
-
+    const parentResolver = new ParentResolver(allPosts, fetchPostedData());
     const quotaTracker = new ThreadsQuotaTracker();
     let processed = 0;
+
     for (const post of due) {
       if (processed >= MAX_POSTS_PER_RUN) break;
 
-      const parent = resolveParent(post);
-      if (parent.status === "wait") continue; // queued のまま次回へ
+      const parent = parentResolver.resolve(post);
+      if (parent.status === "wait") continue; // queued のまま次回へ（親の解決待ち）
       if (parent.status === "broken") {
         markPostFailed(post.id, parent.reason);
-        if (postsById[post.id]) postsById[post.id].status = "failed"; // 同ラン内の子に連鎖中断を伝播
         logErrorToSheet(
           { message: parent.reason, detail: `platform=${post.platform} postId=${post.id}` },
           "autoPost/thread"
@@ -223,11 +293,14 @@ export function autoPost(): void {
       updatePostStatus(post.id, "processing");
       try {
         const parentPostId = parent.status === "ready" ? parent.parentPostId : undefined;
-        const platformPostId = publishPost(post, parentPostId);
+        const mediaUrls = parseMediaUrls(post.mediaUrls);
+        const platformPostId = PLATFORM_HANDLERS[post.platform].publish(
+          post,
+          mediaUrls,
+          parentPostId
+        );
         quotaTracker.consume(post);
-        // 同一ラン内で後続の子がこの投稿を親として参照できるよう記録
-        resolvedPostId[post.id] = platformPostId;
-        resolvedPlatform[post.id] = post.platform;
+        parentResolver.recordPublished(post, platformPostId);
         try {
           movePostToPosted(post, platformPostId);
         } catch (moveError: any) {
@@ -243,7 +316,6 @@ export function autoPost(): void {
         }
       } catch (e: any) {
         markPostFailed(post.id, e.message);
-        if (postsById[post.id]) postsById[post.id].status = "failed"; // 同ラン内の子に連鎖中断を伝播
         logErrorToSheet(
           {
             message: e.message,
@@ -258,7 +330,7 @@ export function autoPost(): void {
     // 対応 Platform の queued が無ければトリガーを自動削除。
     // レート制限で見送った Threads 行や、親待ちの子行が queued のまま残る間はトリガーを維持する。
     const remaining = readPostRows().filter(
-      (r) => isQueued(r) && SUPPORTED_PLATFORMS.indexOf(r.platform) !== -1
+      (r) => isQueued(r) && isSupportedPlatform(r.platform)
     );
     if (remaining.length === 0) {
       deletePostingTriggers();

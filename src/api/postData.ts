@@ -4,7 +4,7 @@
 import { SHEETS, HEADERS } from "../constants";
 import { ensureSheet } from "../sheets";
 import { PostInput, PostRow, Platform } from "../types";
-import { newId } from "../utils";
+import { newId, requireNonEmptyString } from "../utils";
 
 const VALID_PLATFORMS: Platform[] = ["threads", "bluesky"];
 
@@ -145,6 +145,11 @@ export function markPostFailed(id: string, errorMessage: string): void {
 /**
  * スレッド連投の親子関係を設定する（フロントが createMultiple 後に呼ぶ）。
  * updates: [{ id, inReplyTo }]。inReplyTo は親 Post の内部 id（空文字でルート化）。
+ *
+ * リンク時検証（CONTEXT.md「Thread」: 連鎖は同一 PlatformAccount 内に限る）:
+ * - 自己参照の拒否
+ * - 親の存在（Posts または Posted）と PlatformAccount（platform + accountId）一致
+ * - 適用後の Posts 内で循環しないこと
  */
 export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }>): {
   updated: number;
@@ -155,13 +160,60 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
   const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
   const map = indexMap(HEADERS.POST_HEADERS);
   const rows = readPostRows();
-  let updated = 0;
+  const rowById: { [id: string]: PostRow & { __row: number } } = {};
+  rows.forEach((r) => (rowById[String(r.id)] = r));
+  const postedById: { [id: string]: any } = {};
+  fetchPostedData().forEach((r: any) => {
+    if (r.id) postedById[String(r.id)] = r;
+  });
+
+  // 事前検証（1 件でも不正があれば何も書き込まない）
+  const applied: { [id: string]: string } = {}; // 適用後の inReplyTo（循環検査用）
   updates.forEach((u) => {
-    const id = String(u?.id || "").trim();
-    if (!id) throw new Error("Each update must have an id.");
-    const target = rows.find((r) => String(r.id) === id);
-    if (!target) return;
-    sheet.getRange(target.__row, map["inReplyTo"] + 1).setValue(String(u.inReplyTo ?? ""));
+    const id = requireNonEmptyString(u?.id, "id");
+    const parentId = String(u?.inReplyTo ?? "").trim();
+    const target = rowById[id];
+    if (!target) {
+      throw new Error(`Post not found in Posts: ${id}`);
+    }
+    if (!parentId) {
+      applied[id] = ""; // ルート化
+      return;
+    }
+    if (parentId === id) {
+      throw new Error(`inReplyTo が自己参照しています: ${id}`);
+    }
+    const parent = rowById[parentId] || postedById[parentId];
+    if (!parent) {
+      throw new Error(`親 Post が見つかりません（Posts/Posted とも）: ${parentId}`);
+    }
+    if (parent.platform !== target.platform || parent.accountId !== target.accountId) {
+      throw new Error(
+        `親子の PlatformAccount が一致しません` +
+          `（親=${parent.platform}/${parent.accountId} 子=${target.platform}/${target.accountId}）`
+      );
+    }
+    applied[id] = parentId;
+  });
+
+  // 適用後の Posts 内で循環しないか（Posted 済みの親は終端なので循環し得ない）
+  const effectiveParent = (id: string): string => (id in applied ? applied[id] : rowById[id]?.inReplyTo || "");
+  Object.keys(applied).forEach((startId) => {
+    const seen: { [id: string]: boolean } = {};
+    let cursor = startId;
+    while (cursor && rowById[cursor]) {
+      if (seen[cursor]) {
+        throw new Error(`inReplyTo が循環しています: ${startId} から到達`);
+      }
+      seen[cursor] = true;
+      cursor = effectiveParent(cursor);
+    }
+  });
+
+  let updated = 0;
+  Object.keys(applied).forEach((id) => {
+    const target = rowById[id];
+    sheet.getRange(target.__row, map["inReplyTo"] + 1).setValue(applied[id]);
     updated++;
   });
   return { updated };

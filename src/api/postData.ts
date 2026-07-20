@@ -143,6 +143,31 @@ export function markPostFailed(id: string, errorMessage: string): void {
 }
 
 /**
+ * スレッド連投の親子関係を設定する（フロントが createMultiple 後に呼ぶ）。
+ * updates: [{ id, inReplyTo }]。inReplyTo は親 Post の内部 id（空文字でルート化）。
+ */
+export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }>): {
+  updated: number;
+} {
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw new Error("updates must be a non-empty array of { id, inReplyTo }.");
+  }
+  const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
+  const map = indexMap(HEADERS.POST_HEADERS);
+  const rows = readPostRows();
+  let updated = 0;
+  updates.forEach((u) => {
+    const id = String(u?.id || "").trim();
+    if (!id) throw new Error("Each update must have an id.");
+    const target = rows.find((r) => String(r.id) === id);
+    if (!target) return;
+    sheet.getRange(target.__row, map["inReplyTo"] + 1).setValue(String(u.inReplyTo ?? ""));
+    updated++;
+  });
+  return { updated };
+}
+
+/**
  * 投稿成功した Post を Posted シートへ移送する（append → Posts から削除）。
  * @param post 対象の Post
  * @param postId 公開後のプラットフォーム投稿 ID（Threads Media ID / Bluesky AT URI）

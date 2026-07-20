@@ -21,6 +21,7 @@ import {
   fetchPosts,
   fetchPostedData,
   fetchErrorData,
+  updateInReplyTo,
 } from "./api/postData";
 import {
   createPostingTrigger,
@@ -187,6 +188,8 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonSuccess(createPost(requestData), 201);
           case "createMultiple":
             return jsonSuccess(createMultiplePosts(requestData.posts || requestData), 201);
+          case "updateInReplyTo":
+            return jsonSuccess(updateInReplyTo(requestData.threads || requestData));
           case "delete":
             return jsonSuccess(deletePost(requestData));
           default:

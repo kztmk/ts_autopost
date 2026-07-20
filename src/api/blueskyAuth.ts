@@ -152,11 +152,18 @@ function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
   return data.blob;
 }
 
+/** リプライ参照（root と parent の strong ref）。スレッド連投で使う */
+export interface BlueskyReplyRef {
+  root: { uri: string; cid: string };
+  parent: { uri: string; cid: string };
+}
+
 /** createRecord を 1 回叩く（HTTPResponse をそのまま返し、呼び出し側で失効判定する） */
 function createRecordRequest(
   account: BlueskyAccount,
   text: string,
-  embed?: any
+  embed?: any,
+  reply?: BlueskyReplyRef
 ): GoogleAppsScript.URL_Fetch.HTTPResponse {
   const record: any = {
     $type: "app.bsky.feed.post",
@@ -164,6 +171,7 @@ function createRecordRequest(
     createdAt: new Date().toISOString(),
   };
   if (embed) record.embed = embed;
+  if (reply) record.reply = reply;
   const payload = {
     repo: account.did,
     collection: "app.bsky.feed.post",
@@ -179,14 +187,19 @@ function createRecordRequest(
 }
 
 /** 画像アップロード + createRecord を 1 セット実行する。トークン失効時は BlueskyAuthError を投げる */
-function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]): string {
+function doBlueskyPost(
+  account: BlueskyAccount,
+  text: string,
+  images: string[],
+  reply?: BlueskyReplyRef
+): string {
   let embed: any = undefined;
   if (images.length) {
     // alt テキストはデータモデル（PostRow）に持っていないため空で送る（v2 で列追加を検討）
     const uploaded = images.map((url) => ({ alt: "", image: uploadBlueskyBlob(account, url) }));
     embed = { $type: "app.bsky.embed.images", images: uploaded };
   }
-  const res = createRecordRequest(account, text, embed);
+  const res = createRecordRequest(account, text, embed, reply);
   if (isExpiredAuthResponse(res)) {
     throw new BlueskyAuthError("createRecord が失効応答");
   }
@@ -200,12 +213,17 @@ function doBlueskyPost(account: BlueskyAccount, text: string, images: string[]):
 }
 
 /**
- * Bluesky に投稿する（テキスト、任意で画像 1〜4 枚）。
+ * Bluesky に投稿する（テキスト、任意で画像 1〜4 枚、任意でスレッドリプライ）。
  * トークン失効時はオンデマンドで回復して 1 回だけ再試行する
  * （400 の文字数超過等では回復せず、そのままエラーにする）。
  * @return 投稿の AT URI（例: at://did:plc:xxxx/app.bsky.feed.post/xxxx）
  */
-export function postToBluesky(accountId: string, text: string, mediaUrls?: string[]): string {
+export function postToBluesky(
+  accountId: string,
+  text: string,
+  mediaUrls?: string[],
+  reply?: BlueskyReplyRef
+): string {
   const images = filterImageUrls(mediaUrls);
   if (images.length > BLUESKY_MAX_IMAGES) {
     throw new Error(`Bluesky は画像 ${BLUESKY_MAX_IMAGES} 枚までです（${images.length} 枚指定）`);
@@ -217,7 +235,7 @@ export function postToBluesky(accountId: string, text: string, mediaUrls?: strin
   }
 
   try {
-    return doBlueskyPost(account, text, images);
+    return doBlueskyPost(account, text, images, reply);
   } catch (e) {
     if (!(e instanceof BlueskyAuthError)) throw e;
     // 失効 → refresh、だめなら再ログインして 1 回だけ再試行（blob も新トークンで再アップロード）
@@ -226,8 +244,43 @@ export function postToBluesky(accountId: string, text: string, mediaUrls?: strin
     } catch (refreshErr) {
       account = blueskyLogin(account);
     }
-    return doBlueskyPost(account, text, images);
+    return doBlueskyPost(account, text, images, reply);
   }
+}
+
+/** at:// URI を {repo(did), collection, rkey} に分解する */
+function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
+  const m = /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(String(uri));
+  if (!m) throw new Error(`不正な AT URI です: ${uri}`);
+  return { repo: m[1], collection: m[2], rkey: m[3] };
+}
+
+/**
+ * 親投稿の AT URI から、子のリプライに使う root/parent 参照（uri+cid）を得る。
+ * getRecord は PDS の即時整合な読み取りなので、同一ラン内で直前に作った親でも参照できる
+ * （appview のインデックス遅延を避ける）。親自身が返す reply.root からスレッド root を導く。
+ */
+export function getBlueskyReplyRef(accountId: string, parentUri: string): BlueskyReplyRef {
+  const account = loadBlueskyAccount(accountId);
+  const { repo, collection, rkey } = parseAtUri(parentUri);
+  const url =
+    `${BSKY_SERVICE}/xrpc/com.atproto.repo.getRecord` +
+    `?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`;
+  const res = fetchWithRetries(url, {
+    headers: account.accessJwt ? { Authorization: "Bearer " + account.accessJwt } : undefined,
+    muteHttpExceptions: true,
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.uri || !data.cid) {
+    throw new Error(`親投稿(getRecord)の取得に失敗: ${parentUri}: ${JSON.stringify(data)}`);
+  }
+  const parent = { uri: data.uri, cid: data.cid };
+  // 親が既にリプライなら、そのスレッド root を継承。親が root ならそれ自身が root。
+  const root =
+    data.value && data.value.reply && data.value.reply.root
+      ? data.value.reply.root
+      : parent;
+  return { root, parent };
 }
 
 // ---- アカウント CRUD（ルーターから呼ばれる）----

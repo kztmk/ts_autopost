@@ -22,6 +22,8 @@ export interface ThreadsAccount extends PlatformAccountBase {
   appId: string;
   appSecret: string;
   userId?: string;
+  /** 認可済みトークンから取得した @ユーザー名（取り違え確認用） */
+  username?: string;
   accessToken?: string;
   tokenSavedAt?: string;
 }

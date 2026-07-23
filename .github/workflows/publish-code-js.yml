@@ -1,0 +1,51 @@
+name: Publish code.js
+
+# リリース用のタグ（v0.1.0 など）を push すると、code.js をビルドして
+# その タグの GitHub Release に添付・公開する。
+# 公開後は下記の「latest」URL から常に最新版を取得できる:
+#   https://github.com/kztmk/ts_autopost/releases/latest/download/code.js
+#
+# 使い方（例）:
+#   git checkout release        # リリース用ブランチ（任意）
+#   git tag v0.1.0
+#   git push origin release --tags   # または git push origin v0.1.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # Release の作成・アセット添付に必要
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # esbuild でバンドル → modify-codejs.js で IIFE を剥がす（dist/code.js を生成）。
+      # いずれも純粋な Node 実行で、GAS ランタイム/clasp は不要。
+      - name: Build code.js
+        run: npm run build
+
+      # Release アセット名を code.js に固定する（latest/download/code.js を安定させる）。
+      - name: Stage release asset
+        run: cp dist/code.js code.js
+
+      - name: Create GitHub Release with code.js
+        uses: softprops/action-gh-release@v2
+        with:
+          files: code.js
+          fail_on_unmatched_files: true
+          generate_release_notes: true

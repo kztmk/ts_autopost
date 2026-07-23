@@ -3,6 +3,27 @@ import { ErrorLogEntry } from "./types";
 import { ensureSheet } from "./sheets";
 
 /**
+ * UI 表示言語を、ログイン中の Google アカウントのロケールから判定する。
+ * 日本語（ja / ja-JP など）なら "ja"、それ以外は "en"。取得不可時は "ja"。
+ * getActiveUserLocale は認可不要で simple トリガー（onOpen）からも呼べる。
+ */
+export function getUiLang(): "ja" | "en" {
+  try {
+    const locale = (Session.getActiveUserLocale() || "").toLowerCase();
+    return locale.indexOf("ja") === 0 ? "ja" : "en";
+  } catch (e) {
+    return "ja";
+  }
+}
+
+/** 任意の値を "ja" | "en" に正規化する（不明・未指定は "ja"）。 */
+export function normalizeLang(value: any): "ja" | "en" {
+  const v = String(value || "").toLowerCase();
+  if (v.indexOf("en") === 0) return "en";
+  return "ja";
+}
+
+/**
  * Errors シートにエラーを記録する。シートが無ければ作成する。
  * （ScriptLock は取らない。GAS の ScriptLock は再入不可で、autoPost/sweep 実行中
  *  = ロック保持中に呼ばれると取得できずログを落とすため。主要な書き込み元

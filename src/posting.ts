@@ -14,6 +14,7 @@ import { postToBluesky, getBlueskyReplyRef } from "./api/blueskyAuth";
 import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
 import { logErrorToSheet } from "./utils";
+import { sendPostResultNotifications, PostNotification } from "./api/notifications";
 import { PostRow, Platform } from "./types";
 
 /** シート行番号付きの Post 行（readPostRows の戻り値） */
@@ -58,9 +59,9 @@ function isSupportedPlatform(value: any): value is Platform {
 }
 
 function isDue(postSchedule: string, nowMs: number): boolean {
-  if (!postSchedule) return true; // 予約日時なし = 即時
+  if (!postSchedule) return false; // 予約日時なし = 予約なし（自動投稿しない）
   const d = new Date(postSchedule);
-  if (isNaN(d.getTime())) return true; // 不正な日時は投稿を試みる
+  if (isNaN(d.getTime())) return false; // 不正な日時も投稿しない（安全側）
   return d.getTime() <= nowMs;
 }
 
@@ -286,6 +287,9 @@ export function autoPost(): void {
       return originalRow - offset;
     };
 
+    // このランの投稿結果。ループ終了後に 1 通の Discord 通知としてまとめて送る。
+    const notifications: PostNotification[] = [];
+
     let processed = 0;
     for (const post of due) {
       if (processed >= MAX_POSTS_PER_RUN) break;
@@ -298,6 +302,13 @@ export function autoPost(): void {
           { message: parent.reason, detail: `platform=${post.platform} postId=${post.id}` },
           "autoPost/thread"
         );
+        notifications.push({
+          platform: post.platform,
+          accountId: post.accountId,
+          contents: post.contents,
+          success: false,
+          error: parent.reason,
+        });
         continue;
       }
       if (quotaTracker.shouldDefer(post)) continue; // queued のまま次回へ
@@ -314,6 +325,13 @@ export function autoPost(): void {
         );
         quotaTracker.consume(post);
         parentResolver.recordPublished(post, platformPostId); // 移送前に記録（子の連鎖用）
+        notifications.push({
+          platform: post.platform,
+          accountId: post.accountId,
+          contents: post.contents,
+          success: true,
+          postId: platformPostId,
+        });
         try {
           appendToPosted(post, platformPostId);
           deletePostRow(currentRow(post.__row));
@@ -339,7 +357,25 @@ export function autoPost(): void {
           },
           `autoPost/${post.platform}`
         );
+        notifications.push({
+          platform: post.platform,
+          accountId: post.accountId,
+          contents: post.contents,
+          success: false,
+          error: e.message,
+        });
       }
+    }
+
+    // 投稿結果を Discord へ通知（設定 ON かつ Webhook 登録時のみ）。
+    // 通知の失敗は投稿ループ本体に影響させない。
+    try {
+      sendPostResultNotifications(notifications);
+    } catch (notifyError: any) {
+      logErrorToSheet(
+        { message: notifyError.message, stack: notifyError.stack },
+        "autoPost/notify"
+      );
     }
 
     // 対応 Platform の queued が無ければトリガーを自動削除。

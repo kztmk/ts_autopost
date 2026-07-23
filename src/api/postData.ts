@@ -4,7 +4,7 @@
 import { SHEETS, HEADERS } from "../constants";
 import { ensureSheet } from "../sheets";
 import { PostInput, PostRow, Platform } from "../types";
-import { newId, requireNonEmptyString } from "../utils";
+import { newId, requireNonEmptyString, filterImageUrls } from "../utils";
 
 const VALID_PLATFORMS: Platform[] = ["threads", "bluesky"];
 
@@ -230,6 +230,84 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
     updated++;
   });
   return { updated };
+}
+
+/**
+ * 予約日時（postSchedule）を一括更新する（フロントの一括設定/削除）。
+ * updates: [{ id, postSchedule }]。postSchedule は ISO 文字列（空文字 = 即時）。
+ * queued の Post のみ更新可（処理中/投稿済み/失敗は変更しない）。
+ */
+export function updatePostSchedule(
+  updates: Array<{ id: string; postSchedule: string }>
+): { updated: number } {
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw new Error("updates must be a non-empty array of { id, postSchedule }.");
+  }
+  const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
+  const map = indexMap(HEADERS.POST_HEADERS);
+  const rows = readPostRows();
+  const rowById: { [id: string]: PostRow & { __row: number } } = {};
+  rows.forEach((r) => (rowById[String(r.id)] = r));
+
+  // 事前検証（1 件でも不正があれば何も書き込まない）
+  updates.forEach((u) => {
+    const id = requireNonEmptyString(u?.id, "id");
+    const target = rowById[id];
+    if (!target) {
+      throw new Error(`Post not found in Posts: ${id}`);
+    }
+    if (target.status !== "queued") {
+      throw new Error(`queued 以外は予約日時を変更できません: ${id} (status=${target.status})`);
+    }
+  });
+
+  let updated = 0;
+  updates.forEach((u) => {
+    const target = rowById[String(u.id)];
+    const schedule = String(u?.postSchedule ?? "").trim();
+    sheet.getRange(target.__row, map["postSchedule"] + 1).setValue(schedule);
+    updated++;
+  });
+  return { updated };
+}
+
+/**
+ * 既存 Post の内容を編集する（フロントの編集モーダル）。
+ * 渡されたフィールドのみ更新: contents / mediaUrls(配列) / postSchedule。
+ * queued の Post のみ編集可。
+ */
+export function updatePost(data: any): PostRow {
+  const id = requireNonEmptyString(data?.id, "id");
+  const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
+  const map = indexMap(HEADERS.POST_HEADERS);
+  const target = readPostRows().find((r) => String(r.id) === id);
+  if (!target) {
+    throw new Error(`Post not found in Posts: ${id}`);
+  }
+  if (target.status !== "queued") {
+    throw new Error(`queued 以外は編集できません: ${id} (status=${target.status})`);
+  }
+
+  if (data.contents !== undefined) {
+    const contents = String(data.contents ?? "");
+    if (!contents) throw new Error("contents は空にできません。");
+    sheet.getRange(target.__row, map["contents"] + 1).setValue(contents);
+  }
+  if (data.mediaUrls !== undefined) {
+    const images = filterImageUrls(data.mediaUrls);
+    sheet
+      .getRange(target.__row, map["mediaUrls"] + 1)
+      .setValue(images.length ? JSON.stringify(images) : "");
+  }
+  if (data.postSchedule !== undefined) {
+    sheet
+      .getRange(target.__row, map["postSchedule"] + 1)
+      .setValue(String(data.postSchedule ?? "").trim());
+  }
+
+  const updated = readPostRows().find((r) => String(r.id) === id) || target;
+  const { __row, ...post } = updated as any;
+  return post as PostRow;
 }
 
 /**

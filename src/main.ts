@@ -23,6 +23,8 @@ import {
   fetchPostedData,
   fetchErrorData,
   updateInReplyTo,
+  updatePost,
+  updatePostSchedule,
 } from "./api/postData";
 import {
   createPostingTrigger,
@@ -40,11 +42,17 @@ import {
   updateThreadsAuth,
   deleteThreadsAuth,
   getThreadsAuthorizeUrl,
+  getThreadsPermalink,
   isThreadsOAuthCallback,
   handleThreadsOAuthCallback,
   ensureThreadsMaintenanceTrigger,
   deleteThreadsMaintenanceTrigger,
 } from "./api/threadsAuth";
+import {
+  upsertNotificationSettings,
+  testNotification,
+} from "./api/notifications";
+import { getUiLang } from "./utils";
 
 // ============================================================
 // Web アプリのルーター（doGet / doPost）
@@ -65,15 +73,51 @@ function jsonError(message: string, code: number = 400): GoogleAppsScript.Conten
   ).setMimeType(ContentService.MimeType.JSON);
 }
 
+/** メニュー・ダイアログの表示文言（日英）。 */
+const UI_STRINGS = {
+  ja: {
+    menuTitle: "Autopost 連携",
+    setupDeploy: "セットアップ（自動デプロイ）",
+    updateRelease: "最新版に更新",
+    generateCode: "本人確認コードを生成（手動）",
+    initSheets: "シート初期化（手動）",
+    dialogTitle: "本人確認コード",
+    dialogHeading: "本人確認コード",
+    dialogBody:
+      "以下のコードをアプリのプロフィール画面に入力してください。<br>このコードの有効期限は10分です。",
+    copyLabel: "コピー",
+    copiedLabel: "コピーしました",
+  },
+  en: {
+    menuTitle: "Autopost",
+    setupDeploy: "Set up (auto deploy)",
+    updateRelease: "Update to latest",
+    generateCode: "Generate verification code (manual)",
+    initSheets: "Initialize sheets (manual)",
+    dialogTitle: "Verification code",
+    dialogHeading: "Verification code",
+    dialogBody:
+      "Enter the code below on the app's profile screen.<br>This code is valid for 10 minutes.",
+    copyLabel: "Copy",
+    copiedLabel: "Copied",
+  },
+} as const;
+
 /**
  * Spreadsheet を開いたときにメニューを追加する。
+ * メニュー文言は Google アカウントのロケールに応じて日本語/英語で出す。
  */
 export function onOpen(): void {
+  const s = UI_STRINGS[getUiLang()];
   SpreadsheetApp.getUi()
-    .createMenu("Autopost 連携")
-    .addItem("本人確認コードを生成", "showSetupCodeDialog")
+    .createMenu(s.menuTitle)
+    // 自動化された導線（Apps Script API による自己デプロイ / 自己更新）。
+    .addItem(s.setupDeploy, "deploySetup")
+    .addItem(s.updateRelease, "updateFromRelease")
     .addSeparator()
-    .addItem("シート初期化", "initializeSheets")
+    // 手動フォールバック。
+    .addItem(s.generateCode, "showSetupCodeDialog")
+    .addItem(s.initSheets, "initializeSheets")
     .addToUi();
 }
 
@@ -82,14 +126,14 @@ export function onOpen(): void {
  * onOpen のメニューから文字列名で呼ばれる。
  */
 export function showSetupCodeDialog(): void {
+  const s = UI_STRINGS[getUiLang()];
   const setupCode = generateSetupCode();
   const html = HtmlService.createHtmlOutput(
     `
       <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
-        <h2 style="font-size: 18px; margin: 0 0 12px;">本人確認コード</h2>
+        <h2 style="font-size: 18px; margin: 0 0 12px;">${s.dialogHeading}</h2>
         <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">
-          以下のコードをアプリのプロフィール画面に入力してください。<br>
-          このコードの有効期限は10分です。
+          ${s.dialogBody}
         </p>
         <input
           id="setupCode"
@@ -102,7 +146,7 @@ export function showSetupCodeDialog(): void {
           onclick="copyCode()"
           style="margin-top: 12px; padding: 8px 12px; border: 0; border-radius: 4px; background: #1a73e8; color: white; cursor: pointer;"
         >
-          コピー
+          ${s.copyLabel}
         </button>
         <span id="copyStatus" style="margin-left: 8px; font-size: 12px; color: #188038;"></span>
         <script>
@@ -112,7 +156,7 @@ export function showSetupCodeDialog(): void {
           function copyCode() {
             input.select();
             document.execCommand('copy');
-            document.getElementById('copyStatus').textContent = 'コピーしました';
+            document.getElementById('copyStatus').textContent = ${JSON.stringify(s.copiedLabel)};
           }
         </script>
       </div>
@@ -121,7 +165,7 @@ export function showSetupCodeDialog(): void {
     .setWidth(460)
     .setHeight(260);
 
-  SpreadsheetApp.getUi().showModalDialog(html, "本人確認コード");
+  SpreadsheetApp.getUi().showModalDialog(html, s.dialogTitle);
 }
 
 /**
@@ -209,6 +253,10 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonSuccess(
               updateInReplyTo(requestData.updates || requestData.threads || requestData)
             );
+          case "updateSchedule":
+            return jsonSuccess(updatePostSchedule(requestData.updates || requestData));
+          case "update":
+            return jsonSuccess(updatePost(requestData));
           case "delete":
             return jsonSuccess(deletePost(requestData));
           default:
@@ -216,6 +264,12 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
         }
       case "trigger":
         switch (action) {
+          case "status":
+            // Proxy は fetch 以外を POST で転送するため、状態確認も POST で受ける
+            // （GET 側 doGet にも同等の status あり）。
+            return jsonSuccess(
+              checkTriggerExists(requestData?.functionName || POSTING_HANDLER)
+            );
           case "create":
             return jsonSuccess(createPostingTrigger(requestData), 201);
           case "delete":
@@ -253,8 +307,19 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
             return jsonSuccess(deleteThreadsAuth(requestData));
           case "authorizeUrl":
             return jsonSuccess(getThreadsAuthorizeUrl(requestData));
+          case "permalink":
+            return jsonSuccess(getThreadsPermalink(requestData));
           default:
             return jsonError(`Invalid action '${action}' for target 'threadsAuth'`, 400);
+        }
+      case "notificationSettings":
+        switch (action) {
+          case "upsert":
+            return jsonSuccess(upsertNotificationSettings(requestData));
+          case "test":
+            return jsonSuccess(testNotification(requestData));
+          default:
+            return jsonError(`Invalid action '${action}' for target 'notificationSettings'`, 400);
         }
       default:
         return jsonError(`Invalid target '${target}'`, 400);

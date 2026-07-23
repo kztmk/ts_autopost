@@ -17,7 +17,44 @@ import {
   newId,
   deleteTriggersByHandler,
   filterImageUrls,
+  getUiLang,
+  normalizeLang,
 } from "../utils";
+
+/**
+ * OAuth コールバック（無認証・ブラウザ直アクセス）の表示文言（日英）。
+ * 言語は認可 URL 生成時にフロントから渡された値を state に載せて引き継ぐ。
+ */
+const CALLBACK_STRINGS = {
+  ja: {
+    expiredTitle: "認可を受け付けられませんでした",
+    expiredBody:
+      "認可リクエストの有効期限（10分）が切れたか、不正なリクエストです。<br>アプリから認可 URL を再発行してやり直してください。",
+    cancelledTitle: "認可がキャンセルされました",
+    cancelledBody: (reason: string) =>
+      `Threads 側で認可が完了しませんでした。<br>理由: ${reason}`,
+    successTitle: "✅ 認証に成功しました",
+    successBody: (accountId: string) =>
+      `アカウント「${accountId}」の長期アクセストークンを保存しました。<br>このタブは閉じて構いません。`,
+    errorTitle: "エラーが発生しました",
+    errorBody:
+      "トークン交換中にエラーが発生しました。詳細はスプレッドシートの Errors シートに記録されています。<br>アプリから認可 URL を再発行してやり直してください。",
+  },
+  en: {
+    expiredTitle: "Authorization could not be accepted",
+    expiredBody:
+      "The authorization request expired (10 minutes) or was invalid.<br>Please reissue the authorization URL from the app and try again.",
+    cancelledTitle: "Authorization was cancelled",
+    cancelledBody: (reason: string) =>
+      `Authorization did not complete on the Threads side.<br>Reason: ${reason}`,
+    successTitle: "✅ Authentication succeeded",
+    successBody: (accountId: string) =>
+      `Saved the long-lived access token for account "${accountId}".<br>You can close this tab.`,
+    errorTitle: "An error occurred",
+    errorBody:
+      "An error occurred during token exchange. Details are recorded in the Errors sheet of the spreadsheet.<br>Please reissue the authorization URL from the app and try again.",
+  },
+} as const;
 
 const THREADS_GRAPH = "https://graph.threads.net";
 const THREADS_GRAPH_V1 = "https://graph.threads.net/v1.0";
@@ -61,9 +98,37 @@ function maskThreadsAccount(account: ThreadsAccount) {
     appId: account.appId,
     appSecret: maskSensitive(account.appSecret),
     userId: account.userId || "",
+    username: account.username || "",
     authorized: Boolean(account.accessToken),
     tokenSavedAt: account.tokenSavedAt || "",
   };
+}
+
+/**
+ * Threads 投稿の Web パーマリンクを取得する（postId=Media ID から）。
+ * Media ID だけでは URL を組めないため、Graph API の permalink フィールドを都度取得する。
+ */
+export function getThreadsPermalink(data: any): { permalink: string } {
+  const accountId = requireNonEmptyString(data?.accountId, "accountId");
+  const postId = requireNonEmptyString(data?.postId, "postId");
+  const account = loadThreadsAccount(accountId);
+  if (!account.accessToken) {
+    throw new Error(`Threads は未認可です: ${accountId}`);
+  }
+  const url =
+    `${THREADS_GRAPH_V1}/${encodeURIComponent(postId)}` +
+    `?fields=permalink&access_token=${encodeURIComponent(account.accessToken)}`;
+  const res = fetchThreadsJson("パーマリンク取得", url, { method: "get" }, "permalink");
+  return { permalink: String(res.permalink) };
+}
+
+/** 認可済みトークンで /me?fields=username を取得し @ユーザー名を返す（取り違え確認用）。 */
+function fetchThreadsUsername(accessToken: string): string {
+  const url =
+    `${THREADS_GRAPH_V1}/${THREADS_ME}` +
+    `?fields=username&access_token=${encodeURIComponent(accessToken)}`;
+  const data = fetchThreadsJson("ユーザー名取得", url, { method: "get" }, "username");
+  return String(data.username);
 }
 
 // ---- アカウント CRUD（ルーターから呼ばれる）----
@@ -94,7 +159,19 @@ export function getThreadsAuthAll() {
   const all = PropertiesService.getScriptProperties().getProperties();
   return Object.keys(all)
     .filter((k) => k.indexOf(THREADS_ACCOUNT_PREFIX) === 0)
-    .map((k) => maskThreadsAccount(JSON.parse(all[k]) as ThreadsAccount));
+    .map((k) => {
+      const account = JSON.parse(all[k]) as ThreadsAccount;
+      // 認可済みで username 未取得なら、一度だけ取得してキャッシュ（既存アカウントの補完）
+      if (account.accessToken && !account.username) {
+        try {
+          account.username = fetchThreadsUsername(account.accessToken);
+          saveThreadsAccount(account);
+        } catch (usernameErr) {
+          // 取得失敗時はスキップ（次回再試行）
+        }
+      }
+      return maskThreadsAccount(account);
+    });
 }
 
 /** アカウントを更新する。appId/appSecret 変更時は既存トークンを無効化（要・再認可） */
@@ -157,10 +234,13 @@ export function getThreadsAuthorizeUrl(data: any) {
   const account = loadThreadsAccount(accountId);
   const redirectUri = getRedirectUri();
 
+  // フロントの表示言語を state に載せ、無認証コールバックでも同じ言語で表示する。
+  const lang = normalizeLang(data?.lang);
+
   const nonce = newId().replace(/-/g, "");
   CacheService.getScriptCache().put(
     OAUTH_STATE_CACHE_PREFIX + nonce,
-    JSON.stringify({ accountId, redirectUri }),
+    JSON.stringify({ accountId, redirectUri, lang }),
     OAUTH_STATE_TTL_SECONDS
   );
 
@@ -246,18 +326,18 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
   const stateJson = cache.get(cacheKey);
   cache.remove(cacheKey);
   if (!stateJson) {
-    return callbackHtml(
-      "認可を受け付けられませんでした",
-      "認可リクエストの有効期限（10分）が切れたか、不正なリクエストです。<br>アプリから認可 URL を再発行してやり直してください。"
-    );
+    // state が無い（失効・不正）ため言語を復元できない。実行者ロケールで代替する。
+    const sx = CALLBACK_STRINGS[getUiLang()];
+    return callbackHtml(sx.expiredTitle, sx.expiredBody);
   }
-  const { accountId, redirectUri } = JSON.parse(stateJson);
+  const { accountId, redirectUri, lang } = JSON.parse(stateJson);
+  const s = CALLBACK_STRINGS[normalizeLang(lang)];
 
   if (p.error) {
     // error_description はクエリ由来の外部入力。必ずエスケープして埋め込む
     return callbackHtml(
-      "認可がキャンセルされました",
-      `Threads 側で認可が完了しませんでした。<br>理由: ${escapeHtml(p.error_description || p.error)}`
+      s.cancelledTitle,
+      s.cancelledBody(escapeHtml(p.error_description || p.error))
     );
   }
 
@@ -290,24 +370,22 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
     account.userId = String(shortData.user_id);
     account.accessToken = longData.access_token;
     account.tokenSavedAt = new Date().toISOString();
+    try {
+      account.username = fetchThreadsUsername(longData.access_token);
+    } catch (usernameErr) {
+      // ユーザー名取得に失敗しても認可自体は成功として続行（次回 fetch 時に補完）
+    }
     saveThreadsAccount(account);
     ensureThreadsMaintenanceTrigger();
 
-    return callbackHtml(
-      "✅ 認証に成功しました",
-      `アカウント「${escapeHtml(accountId)}」の長期アクセストークンを保存しました。<br>このタブは閉じて構いません。`
-    );
+    return callbackHtml(s.successTitle, s.successBody(escapeHtml(accountId)));
   } catch (err: any) {
     logErrorToSheet(
       { message: err.message, stack: err.stack, detail: `accountId=${accountId}` },
       "threadsOAuthCallback"
     );
     // 無認証ページのため詳細（API 応答 JSON 等）は出さない。詳細は Errors シートへ。
-    return callbackHtml(
-      "エラーが発生しました",
-      "トークン交換中にエラーが発生しました。詳細はスプレッドシートの Errors シートに記録されています。<br>" +
-        "アプリから認可 URL を再発行してやり直してください。"
-    );
+    return callbackHtml(s.errorTitle, s.errorBody);
   }
 }
 

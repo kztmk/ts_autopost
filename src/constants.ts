@@ -1,5 +1,12 @@
 export const VERSION = "0.1.0";
 
+/**
+ * 公開リポジトリ kztmk/ts_autopost の Release から常に最新の code.js を取得する URL。
+ * 「最新版に更新」（setup.ts updateFromRelease）が参照する。
+ */
+export const RELEASE_CODE_URL =
+  "https://github.com/kztmk/ts_autopost/releases/latest/download/code.js";
+
 /** 投稿先プラットフォーム種別（CONTEXT.md「Platform」） */
 export const PLATFORMS = {
   THREADS: "threads",

@@ -77,8 +77,8 @@ function jsonError(message: string, code: number = 400): GoogleAppsScript.Conten
 const UI_STRINGS = {
   ja: {
     menuTitle: "Autopost 連携",
-    setupDeploy: "セットアップ（自動デプロイ）",
-    updateRelease: "最新版に更新",
+    setupDeploy: "セットアップ（デプロイ手順）",
+    updateRelease: "更新手順を表示",
     generateCode: "本人確認コードを生成（手動）",
     initSheets: "シート初期化（手動）",
     dialogTitle: "本人確認コード",
@@ -90,8 +90,8 @@ const UI_STRINGS = {
   },
   en: {
     menuTitle: "Autopost",
-    setupDeploy: "Set up (auto deploy)",
-    updateRelease: "Update to latest",
+    setupDeploy: "Set up (deployment steps)",
+    updateRelease: "Show update steps",
     generateCode: "Generate verification code (manual)",
     initSheets: "Initialize sheets (manual)",
     dialogTitle: "Verification code",

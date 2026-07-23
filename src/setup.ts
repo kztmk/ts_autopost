@@ -136,7 +136,7 @@ export function deploySetup(): void {
     showSetupResultDialog(url, code, s);
   } catch (e: any) {
     if (e instanceof ScriptApiDisabledError) {
-      ui.alert(s.apiDisabledTitle, s.apiDisabledBody, ui.ButtonSet.OK);
+      showApiDisabledDialog(s);
     } else {
       ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
     }
@@ -182,7 +182,7 @@ export function updateFromRelease(): void {
     ui.alert(s.updatedTitle, s.updatedBody(url), ui.ButtonSet.OK);
   } catch (e: any) {
     if (e instanceof ScriptApiDisabledError) {
-      ui.alert(s.apiDisabledTitle, s.apiDisabledBody, ui.ButtonSet.OK);
+      showApiDisabledDialog(s);
     } else {
       ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
     }
@@ -242,9 +242,34 @@ interface SetupStrings {
   updatedTitle: string;
   updatedBody: (url: string) => string;
   apiDisabledTitle: string;
-  apiDisabledBody: string;
+  apiDisabledIntro: string;
+  apiDisabledOpenSettings: string;
+  apiDisabledSteps: string;
   errorTitle: string;
   errorBody: string;
+}
+
+/** Apps Script API 未有効の案内（設定ページへのクリック可能なリンク付き）。 */
+function showApiDisabledDialog(s: SetupStrings): void {
+  const settingsUrl = "https://script.google.com/home/usersettings";
+  const html = HtmlService.createHtmlOutput(
+    `
+    <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
+      <h2 style="font-size: 18px; margin: 0 0 8px;">${s.apiDisabledTitle}</h2>
+      <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">${s.apiDisabledIntro}</p>
+      <p style="margin: 0 0 12px;">
+        <a href="${settingsUrl}" target="_blank" rel="noopener"
+           style="display:inline-block; padding:8px 14px; border-radius:4px; background:#1a73e8; color:#fff; text-decoration:none; font-size:13px;">
+          ${s.apiDisabledOpenSettings}
+        </a>
+      </p>
+      <p style="font-size: 13px; line-height: 1.7; margin: 0; color:#5f6368;">${s.apiDisabledSteps}</p>
+    </div>
+    `
+  )
+    .setWidth(500)
+    .setHeight(260);
+  SpreadsheetApp.getUi().showModalDialog(html, s.apiDisabledTitle);
 }
 
 /** メニュー・ダイアログの表示文言（日英）。 */
@@ -262,11 +287,11 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
     updatedBody: (url: string) =>
       `最新版に更新し、同じ Web アプリ URL で再デプロイしました。<br>URL は変わりません:<br>${url}`,
     apiDisabledTitle: "Apps Script API の有効化が必要です",
-    apiDisabledBody:
-      "自動デプロイには Apps Script API の有効化が必要です。\n\n" +
-      "1) https://script.google.com/home/usersettings を開く\n" +
-      "2) 「Google Apps Script API」をオンにする\n" +
-      "3) 数分待ってから、もう一度このメニューを実行してください。",
+    apiDisabledIntro:
+      "自動デプロイには「Apps Script API」の有効化が必要です（初回だけの操作です。一度オンにすれば以降このメニューはワンクリックで完了します）。",
+    apiDisabledOpenSettings: "Apps Script の設定を開く",
+    apiDisabledSteps:
+      "上のボタンから設定ページを開き、「Google Apps Script API」をオンにしてください。その後、メニュー「Autopost 連携 → セットアップ（自動デプロイ）」をもう一度実行します。反映に少し時間がかかる場合があります（通常は数十秒）。",
     errorTitle: "エラーが発生しました",
     errorBody: "処理中にエラーが発生しました。時間をおいて再度お試しください。",
   },
@@ -283,11 +308,11 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
     updatedBody: (url: string) =>
       `Updated to the latest version and redeployed with the same web app URL.<br>The URL does not change:<br>${url}`,
     apiDisabledTitle: "You need to enable the Apps Script API",
-    apiDisabledBody:
-      "Automatic deployment requires the Apps Script API to be enabled.\n\n" +
-      "1) Open https://script.google.com/home/usersettings\n" +
-      "2) Turn on \"Google Apps Script API\"\n" +
-      "3) Wait a few minutes, then run this menu again.",
+    apiDisabledIntro:
+      "Automatic deployment requires enabling the \"Apps Script API\" (a one-time step; once it is on, this menu completes in one click from then on).",
+    apiDisabledOpenSettings: "Open Apps Script settings",
+    apiDisabledSteps:
+      "Open the settings page with the button above and turn on \"Google Apps Script API\". Then run the menu \"Autopost 連携 → Set up (auto deploy)\" again. It may take a moment to take effect (usually under a minute).",
     errorTitle: "An error occurred",
     errorBody: "An error occurred. Please wait a moment and try again.",
   },

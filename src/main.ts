@@ -77,8 +77,8 @@ function jsonError(message: string, code: number = 400): GoogleAppsScript.Conten
 const UI_STRINGS = {
   ja: {
     menuTitle: "Autopost 連携",
-    setupDeploy: "セットアップ（自動デプロイ）",
-    updateRelease: "最新版に更新",
+    setupDeploy: "セットアップ（URL・本人確認コード）",
+    updateRelease: "更新手順を表示",
     generateCode: "本人確認コードを生成（手動）",
     initSheets: "シート初期化（手動）",
     dialogTitle: "本人確認コード",
@@ -90,8 +90,8 @@ const UI_STRINGS = {
   },
   en: {
     menuTitle: "Autopost",
-    setupDeploy: "Set up (auto deploy)",
-    updateRelease: "Update to latest",
+    setupDeploy: "Set up (URL & code)",
+    updateRelease: "Show update steps",
     generateCode: "Generate verification code (manual)",
     initSheets: "Initialize sheets (manual)",
     dialogTitle: "Verification code",
@@ -106,19 +106,35 @@ const UI_STRINGS = {
 /**
  * Spreadsheet を開いたときにメニューを追加する。
  * メニュー文言は Google アカウントのロケールに応じて日本語/英語で出す。
+ *
+ * 認証ポップアップを1回で済ませるため、デプロイが完了して初めて「セットアップ」を出す。
+ * （未デプロイのうちにメニューを実行すると認証ポップアップが起き、その後デプロイで再度
+ *  認証が走って二重になるため。先にデプロイ→再読込→この項目が出る、という順にする。）
+ * 判定は ScriptApp.getService().getUrl()。取得不可（例外）時は安全側で項目を出す。
  */
 export function onOpen(): void {
   const s = UI_STRINGS[getUiLang()];
-  SpreadsheetApp.getUi()
-    .createMenu(s.menuTitle)
-    // 自動化された導線（Apps Script API による自己デプロイ / 自己更新）。
-    .addItem(s.setupDeploy, "deploySetup")
-    .addItem(s.updateRelease, "updateFromRelease")
-    .addSeparator()
-    // 手動フォールバック。
-    .addItem(s.generateCode, "showSetupCodeDialog")
-    .addItem(s.initSheets, "initializeSheets")
-    .addToUi();
+  const menu = SpreadsheetApp.getUi().createMenu(s.menuTitle);
+
+  let deployed = false;
+  let detectionWorked = true;
+  try {
+    deployed = Boolean(ScriptApp.getService().getUrl());
+  } catch (e) {
+    detectionWorked = false;
+  }
+
+  // デプロイ済み、または判定不能（安全側）のときだけセットアップ/更新を出す。
+  if (deployed || !detectionWorked) {
+    menu.addItem(s.setupDeploy, "deploySetup");
+    menu.addItem(s.updateRelease, "updateFromRelease");
+    menu.addSeparator();
+  }
+
+  // 手動フォールバック（常時表示）。
+  menu.addItem(s.generateCode, "showSetupCodeDialog");
+  menu.addItem(s.initSheets, "initializeSheets");
+  menu.addToUi();
 }
 
 /**

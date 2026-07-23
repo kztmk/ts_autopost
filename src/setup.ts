@@ -1,114 +1,18 @@
-// ワンクリック・セットアップ / 自動更新（Apps Script API で自分自身を操作する）。
+// セットアップ / 更新のガイド（手動デプロイ方式）。
 //
-// - deploySetup():      シート初期化 → 自分を Web アプリとして自動デプロイ（/exec 取得）
-//                       → 本人確認コード生成 → 結果ダイアログ表示。
-// - updateFromRelease(): GitHub Release の最新 code.js を取得 → 自分のコードを差し替え
-//                       → 同じデプロイを新バージョンに更新（/exec URL は不変）。
+// Apps Script API は使わない（全ユーザーで確実に動く）。デプロイは Apps Script エディタの
+// 「デプロイ」ボタンでユーザーが行い、この画面は確認チェックリストとコピー用の値を提示する。
 //
-// 前提: ユーザーが一度だけ「Apps Script API」を有効化
-//   （https://script.google.com/home/usersettings）し、
-//   script.projects / script.deployments スコープを承認していること。
-// 未有効の場合は 403 を検出し、有効化手順を案内する（ScriptApiDisabledError）。
+// 認証ポップアップを1回で済ませるため、運用は「先にデプロイ → シートを再読込 → メニュー実行」。
+// onOpen 側でデプロイ済みか判定し、未デプロイのうちはセットアップ項目を出さない（main.ts）。
+//
+// - deploySetup():      デプロイ確認チェックリスト＋ウェブアプリURL（自動取得）＋本人確認コードを表示。
+// - updateFromRelease(): 最新 code.js の貼り替え＆再デプロイ手順を表示。
 
-import { getUiLang, fetchWithRetries } from "./utils";
+import { getUiLang } from "./utils";
 import { generateSetupCode } from "./security";
 import { ensureSheet } from "./sheets";
-import { SHEETS, HEADERS, RELEASE_CODE_URL } from "./constants";
-
-const SCRIPT_API_BASE = "https://script.googleapis.com/v1";
-const MANIFEST_FILE_NAME = "appsscript";
-const CODE_FILE_NAME = "code";
-
-const SETUP_PROP_KEYS = {
-  deploymentId: "setup_webAppDeploymentId",
-} as const;
-
-/** Apps Script API が未有効（ユーザー設定でオフ）のときに投げる。 */
-class ScriptApiDisabledError extends Error {
-  constructor() {
-    super("Apps Script API is not enabled for this account.");
-    this.name = "ScriptApiDisabledError";
-  }
-}
-
-/** Apps Script API を叩く共通処理。403(API未有効) は専用エラーに変換する。 */
-function scriptApiFetch(method: string, apiPath: string, payload?: any): any {
-  const res = UrlFetchApp.fetch(`${SCRIPT_API_BASE}/${apiPath}`, {
-    method: method as GoogleAppsScript.URL_Fetch.HttpMethod,
-    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
-    contentType: "application/json",
-    muteHttpExceptions: true,
-    ...(payload ? { payload: JSON.stringify(payload) } : {}),
-  });
-  const code = res.getResponseCode();
-  const text = res.getContentText();
-  if (
-    code === 403 &&
-    /has not been used|SERVICE_DISABLED|accessNotConfigured|Apps Script API/i.test(text)
-  ) {
-    throw new ScriptApiDisabledError();
-  }
-  if (code < 200 || code >= 300) {
-    throw new Error(`Apps Script API error (${code}): ${text}`);
-  }
-  return text ? JSON.parse(text) : {};
-}
-
-/** Deployment レスポンスから Web アプリの /exec URL を取り出す。 */
-function extractWebAppUrl(deployment: any): string | null {
-  const eps = (deployment && deployment.entryPoints) || [];
-  for (const ep of eps) {
-    if (ep.entryPointType === "WEB_APP" && ep.webApp && ep.webApp.url) {
-      return ep.webApp.url as string;
-    }
-  }
-  return null;
-}
-
-/**
- * 自分自身の新バージョンを作成し、Web アプリのデプロイを作成/更新して /exec URL を返す。
- * 既存デプロイ ID を Script Properties に保存し、更新時は同じ URL を維持する。
- */
-function ensureWebAppDeployment(): string {
-  const scriptId = ScriptApp.getScriptId();
-  const props = PropertiesService.getScriptProperties();
-
-  const version = scriptApiFetch("POST", `projects/${scriptId}/versions`, {
-    description: `autopost ${new Date().toISOString()}`,
-  });
-  const versionNumber = version.versionNumber;
-
-  const config = {
-    versionNumber,
-    manifestFileName: MANIFEST_FILE_NAME,
-    description: "Autopost Web App",
-  };
-
-  const storedId = props.getProperty(SETUP_PROP_KEYS.deploymentId);
-  let deployment: any;
-  if (storedId) {
-    try {
-      deployment = scriptApiFetch("PUT", `projects/${scriptId}/deployments/${storedId}`, {
-        deploymentConfig: config,
-      });
-    } catch (e) {
-      // 保存済み ID が消えている等。作り直してIDを更新する。
-      deployment = scriptApiFetch("POST", `projects/${scriptId}/deployments`, config);
-      props.setProperty(SETUP_PROP_KEYS.deploymentId, deployment.deploymentId);
-    }
-  } else {
-    deployment = scriptApiFetch("POST", `projects/${scriptId}/deployments`, config);
-    props.setProperty(SETUP_PROP_KEYS.deploymentId, deployment.deploymentId);
-  }
-
-  const url = extractWebAppUrl(deployment);
-  if (!url) {
-    throw new Error(
-      "Web アプリ URL を取得できませんでした。manifest の webapp 設定を確認してください。"
-    );
-  }
-  return url;
-}
+import { SHEETS, HEADERS } from "./constants";
 
 /** シート（Posts / Posted / Errors）が無ければ作成する（冪等）。 */
 function ensureSheetsInitialized(): void {
@@ -120,103 +24,91 @@ function ensureSheetsInitialized(): void {
   specs.forEach((s) => ensureSheet(s.name, s.headers));
 }
 
+/** デプロイ済みならウェブアプリ /exec URL を返す（未デプロイ・取得不可なら空文字）。 */
+export function getDeployedWebAppUrl(): string {
+  try {
+    return ScriptApp.getService().getUrl() || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function escapeHtml(v: string): string {
+  return String(v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 番号付きリストの HTML を作る。 */
+function stepsToOl(steps: string[]): string {
+  return `<ol style="margin:0 0 12px; padding-left:20px; font-size:13px; line-height:1.9;">${steps
+    .map((x) => `<li>${escapeHtml(x)}</li>`)
+    .join("")}</ol>`;
+}
+
 // ---- メニューから呼ばれるエントリポイント ----
 
 /**
- * ワンクリック・セットアップ。
- * シート初期化 → 自動デプロイ → 本人確認コード生成 → 結果ダイアログ。
+ * セットアップ。デプロイ確認チェックリスト＋ウェブアプリURL（自動取得）＋本人確認コードを表示。
+ * 想定運用: 先にデプロイ済み → この時点でURLが自動取得できる。
  */
 export function deploySetup(): void {
   const s = SETUP_STRINGS[getUiLang()];
   const ui = SpreadsheetApp.getUi();
   try {
     ensureSheetsInitialized();
-    const url = ensureWebAppDeployment();
+    const url = getDeployedWebAppUrl();
     const code = generateSetupCode();
-    showSetupResultDialog(url, code, s);
+    showSetupDialog(url, code, s);
   } catch (e: any) {
-    if (e instanceof ScriptApiDisabledError) {
-      showApiDisabledDialog(s);
-    } else {
-      ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
-    }
+    ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
   }
 }
 
-/**
- * GitHub Release の最新 code.js を取得して自分のコードを差し替え、
- * 同じデプロイを新バージョンに更新する（/exec URL は不変）。
- * appsscript マニフェストは温存する（スコープ再承認を避けるため）。
- */
+/** 更新手順（最新 code.js の貼り替え＋再デプロイ）を案内する。 */
 export function updateFromRelease(): void {
   const s = SETUP_STRINGS[getUiLang()];
   const ui = SpreadsheetApp.getUi();
   try {
-    const res = fetchWithRetries(RELEASE_CODE_URL, {
-      method: "get",
-      muteHttpExceptions: true,
-      followRedirects: true,
-    });
-    if (res.getResponseCode() !== 200) {
-      throw new Error(`code.js の取得に失敗しました (${res.getResponseCode()})。`);
-    }
-    const newCode = res.getContentText();
-
-    const scriptId = ScriptApp.getScriptId();
-    const content = scriptApiFetch("GET", `projects/${scriptId}/content`);
-    const files: any[] = content.files || [];
-    const manifest = files.find((f) => f.type === "JSON");
-    if (!manifest) {
-      throw new Error("マニフェスト(appsscript)が見つかりませんでした。");
-    }
-
-    // マニフェストは温存し、サーバーコードは 1 ファイル（code）に統一して差し替える。
-    scriptApiFetch("PUT", `projects/${scriptId}/content`, {
-      files: [
-        { name: manifest.name, type: "JSON", source: manifest.source },
-        { name: CODE_FILE_NAME, type: "SERVER_JS", source: newCode },
-      ],
-    });
-
-    const url = ensureWebAppDeployment(); // 新バージョン作成＋同一デプロイ更新
-    ui.alert(s.updatedTitle, s.updatedBody(url), ui.ButtonSet.OK);
+    showUpdateDialog(s);
   } catch (e: any) {
-    if (e instanceof ScriptApiDisabledError) {
-      showApiDisabledDialog(s);
-    } else {
-      ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
-    }
+    ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
   }
 }
 
-/** セットアップ結果（/exec URL・本人確認コード）をコピーしやすいダイアログで表示する。 */
-function showSetupResultDialog(url: string, code: string, s: SetupStrings): void {
-  const esc = (v: string) =>
-    String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** セットアップ（デプロイ確認＋URL＋本人確認コード）のダイアログ。 */
+function showSetupDialog(url: string, code: string, s: SetupStrings): void {
+  const urlValue = url || "";
+  const urlNote = url ? s.urlAutoNote : s.urlManualNote;
   const html = HtmlService.createHtmlOutput(
     `
     <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
-      <h2 style="font-size: 18px; margin: 0 0 8px;">${s.resultTitle}</h2>
-      <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">${s.resultBody}</p>
+      <h2 style="font-size: 18px; margin: 0 0 8px;">${s.setupTitle}</h2>
+      <p style="font-size: 13px; line-height: 1.7; margin: 0 0 8px;"><b>${s.setupChecklistLead}</b></p>
+      ${stepsToOl(s.deploySteps)}
 
       <label style="font-size: 12px; font-weight: bold;">${s.webAppUrlLabel}</label>
-      <div style="display:flex; gap:8px; margin: 4px 0 12px;">
-        <input id="url" type="text" readonly value="${esc(url)}"
+      <div style="display:flex; gap:8px; margin: 4px 0 4px;">
+        <input id="url" type="text" readonly value="${escapeHtml(urlValue)}"
+          placeholder="https://script.google.com/macros/s/.../exec"
           style="flex:1; padding:8px; font-size:13px; font-family:monospace;" />
-        <button onclick="copy('url')" style="padding:8px 10px; border:0; border-radius:4px; background:#1a73e8; color:#fff; cursor:pointer;">${s.copyLabel}</button>
+        <button onclick="copyField('url')" style="padding:8px 10px; border:0; border-radius:4px; background:#1a73e8; color:#fff; cursor:pointer;">${s.copyLabel}</button>
       </div>
+      <p style="font-size:11px; color:#5f6368; margin:0 0 12px;">${urlNote}</p>
 
       <label style="font-size: 12px; font-weight: bold;">${s.codeLabel}</label>
       <div style="display:flex; gap:8px; margin: 4px 0 8px;">
-        <input id="code" type="text" readonly value="${esc(code)}"
+        <input id="code" type="text" readonly value="${escapeHtml(code)}"
           style="flex:1; padding:8px; font-size:16px; font-family:monospace;" />
-        <button onclick="copy('code')" style="padding:8px 10px; border:0; border-radius:4px; background:#1a73e8; color:#fff; cursor:pointer;">${s.copyLabel}</button>
+        <button onclick="copyField('code')" style="padding:8px 12px; border:0; border-radius:4px; background:#1a73e8; color:#fff; cursor:pointer;">${s.copyLabel}</button>
       </div>
       <p style="font-size:12px; color:#188038; margin:0;" id="status"></p>
       <p style="font-size:12px; color:#5f6368; margin:8px 0 0;">${s.codeExpiryNote}</p>
 
       <script>
-        function copy(id){
+        function copyField(id){
           const el = document.getElementById(id);
           el.select();
           document.execCommand('copy');
@@ -226,93 +118,107 @@ function showSetupResultDialog(url: string, code: string, s: SetupStrings): void
     </div>
     `
   )
-    .setWidth(560)
-    .setHeight(320);
-  SpreadsheetApp.getUi().showModalDialog(html, s.resultTitle);
+    .setWidth(580)
+    .setHeight(520);
+  SpreadsheetApp.getUi().showModalDialog(html, s.setupTitle);
+}
+
+/** 更新手順のダイアログ。 */
+function showUpdateDialog(s: SetupStrings): void {
+  const html = HtmlService.createHtmlOutput(
+    `
+    <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
+      <h2 style="font-size: 18px; margin: 0 0 8px;">${s.updateTitle}</h2>
+      <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">${s.updateIntro}</p>
+      ${stepsToOl(s.updateSteps)}
+    </div>
+    `
+  )
+    .setWidth(580)
+    .setHeight(340);
+  SpreadsheetApp.getUi().showModalDialog(html, s.updateTitle);
 }
 
 interface SetupStrings {
-  resultTitle: string;
-  resultBody: string;
+  setupTitle: string;
+  setupChecklistLead: string;
+  deploySteps: string[];
   webAppUrlLabel: string;
+  urlAutoNote: string;
+  urlManualNote: string;
   codeLabel: string;
   copyLabel: string;
   copiedLabel: string;
   codeExpiryNote: string;
-  updatedTitle: string;
-  updatedBody: (url: string) => string;
-  apiDisabledTitle: string;
-  apiDisabledIntro: string;
-  apiDisabledOpenSettings: string;
-  apiDisabledSteps: string;
+  updateTitle: string;
+  updateIntro: string;
+  updateSteps: string[];
   errorTitle: string;
   errorBody: string;
-}
-
-/** Apps Script API 未有効の案内（設定ページへのクリック可能なリンク付き）。 */
-function showApiDisabledDialog(s: SetupStrings): void {
-  const settingsUrl = "https://script.google.com/home/usersettings";
-  const html = HtmlService.createHtmlOutput(
-    `
-    <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
-      <h2 style="font-size: 18px; margin: 0 0 8px;">${s.apiDisabledTitle}</h2>
-      <p style="font-size: 13px; line-height: 1.7; margin: 0 0 12px;">${s.apiDisabledIntro}</p>
-      <p style="margin: 0 0 12px;">
-        <a href="${settingsUrl}" target="_blank" rel="noopener"
-           style="display:inline-block; padding:8px 14px; border-radius:4px; background:#1a73e8; color:#fff; text-decoration:none; font-size:13px;">
-          ${s.apiDisabledOpenSettings}
-        </a>
-      </p>
-      <p style="font-size: 13px; line-height: 1.7; margin: 0; color:#5f6368;">${s.apiDisabledSteps}</p>
-    </div>
-    `
-  )
-    .setWidth(500)
-    .setHeight(260);
-  SpreadsheetApp.getUi().showModalDialog(html, s.apiDisabledTitle);
 }
 
 /** メニュー・ダイアログの表示文言（日英）。 */
 const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
   ja: {
-    resultTitle: "セットアップ完了",
-    resultBody:
-      "以下の2つをアプリのプロフィール画面（API設定）に入力してください。<br>Webアプリのデプロイと本人確認コードの発行が完了しました。",
-    webAppUrlLabel: "Web アプリ URL（Google Sheets URL 欄）",
-    codeLabel: "本人確認コード",
+    setupTitle: "セットアップ（URL・本人確認コード）",
+    setupChecklistLead: "デプロイはお済みですか？（以下の手順）",
+    deploySteps: [
+      "シートメニューの「拡張機能 → Apps Script」を開く。",
+      "スクリプトエディタ右上の「デプロイ → 新しいデプロイ」をクリック。",
+      "「種類の選択（歯車）→ ウェブアプリ」を選択。",
+      "「デプロイ」→「アクセスを承認」→ Google の確認画面で許可（「すべて選択」→続行）。",
+      "表示された「ウェブアプリ URL」（.../exec）をコピー。",
+      "シートに戻り、再読み込みしてからこのメニューを実行（下に URL が自動表示されます）。",
+    ],
+    webAppUrlLabel: "ウェブアプリ URL（アプリの「Google Sheets URL」欄）",
+    urlAutoNote: "デプロイ済みのため自動取得しました。上のコピーで貼り付けてください。",
+    urlManualNote:
+      "自動取得できませんでした。先にデプロイし、シートを再読み込みしてから再実行するか、デプロイ画面の URL を貼り付けてください。",
+    codeLabel: "本人確認コード（アプリの「GAS 本人確認コード」欄）",
     copyLabel: "コピー",
     copiedLabel: "コピーしました",
-    codeExpiryNote: "本人確認コードの有効期限は10分です。",
-    updatedTitle: "更新完了",
-    updatedBody: (url: string) =>
-      `最新版に更新し、同じ Web アプリ URL で再デプロイしました。<br>URL は変わりません:<br>${url}`,
-    apiDisabledTitle: "Apps Script API の有効化が必要です",
-    apiDisabledIntro:
-      "自動デプロイには「Apps Script API」の有効化が必要です（初回だけの操作です。一度オンにすれば以降このメニューはワンクリックで完了します）。",
-    apiDisabledOpenSettings: "Apps Script の設定を開く",
-    apiDisabledSteps:
-      "上のボタンから設定ページを開き、「Google Apps Script API」をオンにしてください。その後、メニュー「Autopost 連携 → セットアップ（自動デプロイ）」をもう一度実行します。反映に少し時間がかかる場合があります（通常は数十秒）。",
+    codeExpiryNote: "本人確認コードの有効期限は10分です。期限切れの場合はこのメニューを再実行してください。",
+    updateTitle: "更新手順",
+    updateIntro:
+      "バックエンドを最新版に更新します。ウェブアプリ URL は変わらないため、アプリ側の再設定は不要です。",
+    updateSteps: [
+      "アプリの「プロフィール → API 設定」にある「GASスクリプト（code.js）を手動でダウンロード」から最新コードを取得。",
+      "シートメニューの「拡張機能 → Apps Script」を開き、既存コードを全て消して貼り付けて保存。",
+      "「デプロイ」→「デプロイを管理」→ 対象デプロイの編集（鉛筆）→ バージョンを「新バージョン」にして「デプロイ」。",
+      "以上で完了です（ウェブアプリ URL は変わりません）。",
+    ],
     errorTitle: "エラーが発生しました",
     errorBody: "処理中にエラーが発生しました。時間をおいて再度お試しください。",
   },
   en: {
-    resultTitle: "Setup complete",
-    resultBody:
-      "Enter the following two values on the app's profile screen (API settings).<br>Web app deployment and verification code generation are complete.",
-    webAppUrlLabel: "Web app URL (Google Sheets URL field)",
-    codeLabel: "Verification code",
+    setupTitle: "Set up (URL & verification code)",
+    setupChecklistLead: "Have you deployed yet? (steps below)",
+    deploySteps: [
+      "Open \"Extensions → Apps Script\" from the sheet menu.",
+      "Click \"Deploy → New deployment\" at the top right of the script editor.",
+      "Click \"Select type\" (gear) → choose \"Web app\".",
+      "Click \"Deploy\" → \"Authorize access\" → allow on Google's screen (\"Select all\" → Continue).",
+      "Copy the shown \"Web app URL\" (.../exec).",
+      "Return to the sheet, reload it, then run this menu (the URL appears below automatically).",
+    ],
+    webAppUrlLabel: "Web app URL (the app's \"Google Sheets URL\" field)",
+    urlAutoNote: "Detected automatically because it is already deployed. Copy it above and paste it.",
+    urlManualNote:
+      "Could not detect it automatically. Deploy first and reload the sheet, then run again, or paste the URL from the deploy screen.",
+    codeLabel: "Verification code (the app's \"GAS verification code\" field)",
     copyLabel: "Copy",
     copiedLabel: "Copied",
-    codeExpiryNote: "The verification code is valid for 10 minutes.",
-    updatedTitle: "Update complete",
-    updatedBody: (url: string) =>
-      `Updated to the latest version and redeployed with the same web app URL.<br>The URL does not change:<br>${url}`,
-    apiDisabledTitle: "You need to enable the Apps Script API",
-    apiDisabledIntro:
-      "Automatic deployment requires enabling the \"Apps Script API\" (a one-time step; once it is on, this menu completes in one click from then on).",
-    apiDisabledOpenSettings: "Open Apps Script settings",
-    apiDisabledSteps:
-      "Open the settings page with the button above and turn on \"Google Apps Script API\". Then run the menu \"Autopost 連携 → Set up (auto deploy)\" again. It may take a moment to take effect (usually under a minute).",
+    codeExpiryNote:
+      "The verification code is valid for 10 minutes. If it expires, run this menu again.",
+    updateTitle: "Update steps",
+    updateIntro:
+      "Update the backend to the latest version. The web app URL does not change, so no reconfiguration is needed on the app side.",
+    updateSteps: [
+      "Get the latest code from \"Download the GAS script (code.js) manually\" in the app's Profile → API settings.",
+      "Open \"Extensions → Apps Script\" from the sheet menu, delete all existing code, paste, and save.",
+      "Click \"Deploy\" → \"Manage deployments\" → edit the deployment (pencil) → set Version to \"New version\" → \"Deploy\".",
+      "Done (the web app URL does not change).",
+    ],
     errorTitle: "An error occurred",
     errorBody: "An error occurred. Please wait a moment and try again.",
   },

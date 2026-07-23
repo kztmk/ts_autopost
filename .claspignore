@@ -1,0 +1,5 @@
+# すべて無視した上で、GAS へ push するファイルだけを許可する
+**/**
+
+!appsscript.json
+!code.js

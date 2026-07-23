@@ -1,7 +1,7 @@
 node_modules/
 .node_modules/
-built/*
-
+dist/
+code.js
 
 **/.DS_Store
 

@@ -1,6 +1,6 @@
 {
   "name": "autopost-threads-bluesky",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Threads/Bluesky 予約投稿の GAS バックエンド。snake-sns(Torai) 系フロントエンド + Firebase Functions Proxy から HMAC 署名付きで操作される。x_Autopost の姉妹プロジェクト。",
   "author": "kztmk",
   "license": "MIT",

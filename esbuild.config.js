@@ -7,6 +7,11 @@ const esbuild = require("esbuild");
 const fs = require("fs");
 const path = require("path");
 
+// package.json の version をビルド時にバンドルへ注入する（constants.ts の VERSION が参照）。
+// これにより `npm version minor/major` でのバージョン更新が code.js に反映され、
+// リリースタグ・フロントの更新チェックと一致する。
+const pkg = require("./package.json");
+
 const srcDir = path.join(__dirname, "src");
 
 function collectModules(dir) {
@@ -46,6 +51,7 @@ esbuild
     outfile: "dist/code.js",
     treeShaking: false, // GAS では全関数を残す
     minify: false,
+    define: { __GAS_VERSION__: JSON.stringify(pkg.version) },
     footer: { js: "\nObject.assign(this, MyApp);\n" },
   })
   .then(() => {

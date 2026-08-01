@@ -1,4 +1,8 @@
-export const VERSION = "0.1.0";
+// ビルド時に esbuild define で package.json の version が注入される（esbuild.config.js）。
+// GAS エディタで直接実行した場合など、define が無い環境向けのフォールバックも用意する。
+declare const __GAS_VERSION__: string | undefined;
+export const VERSION =
+  typeof __GAS_VERSION__ !== "undefined" ? __GAS_VERSION__ : "0.1.0";
 
 /**
  * 公開リポジトリ kztmk/ts_autopost の Release から常に最新の code.js を取得する URL。

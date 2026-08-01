@@ -53,6 +53,16 @@ import {
   testNotification,
 } from "./api/notifications";
 import { getUiLang } from "./utils";
+import { VERSION } from "./constants";
+
+/**
+ * バックエンド（GAS）のバージョン情報を返す。
+ * フロントはこの値を GitHub Release の最新版と比較し、古ければ更新を促す。
+ * target=appInfo&action=get で呼び出す（Proxy 署名必須）。
+ */
+export function getAppInfo(): { version: string } {
+  return { version: VERSION };
+}
 
 // ============================================================
 // Web アプリのルーター（doGet / doPost）
@@ -337,6 +347,9 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
           default:
             return jsonError(`Invalid action '${action}' for target 'notificationSettings'`, 400);
         }
+      case "appInfo":
+        if (action === "get") return jsonSuccess(getAppInfo());
+        return jsonError(`Invalid action '${action}' for target 'appInfo'`, 400);
       default:
         return jsonError(`Invalid target '${target}'`, 400);
     }
@@ -395,6 +408,9 @@ export function doGet(
       case "threadsAuth":
         if (action === "fetch") return jsonSuccess(getThreadsAuthAll());
         return jsonError(`Invalid action '${action}' for target 'threadsAuth'`, 400);
+      case "appInfo":
+        if (action === "get") return jsonSuccess(getAppInfo());
+        return jsonError(`Invalid action '${action}' for target 'appInfo'`, 400);
       case "insights":
         // アカウント全体の現在値（オンデマンド GET）。platform/accountId はクエリで受け取る。
         if (action === "account") {

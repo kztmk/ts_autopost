@@ -1,10 +1,10 @@
 // Posted / Errors シートのアーカイブ。x_Autopost の archiveSheet を移植。
-// 対象シートを Drive 上の別スプレッドシート「Autopost_Archive」へ新しいシートとしてコピーし、
+// 対象シートを Drive 上の別スプレッドシート「Aqila_Archive」へ新しいシートとしてコピーし、
 // 元シートは削除する（次回アクセス時に ensureSheet がヘッダー付きで再作成する）。
 
 import { SHEETS } from "../constants";
 
-const ARCHIVE_FILE_NAME = "Autopost_Archive";
+const ARCHIVE_FILE_NAME = "Aqila_Archive";
 const ARCHIVE_FILE_ID_PROP = "archive_spreadsheet_id"; // 作成したファイル ID を記憶する
 const ARCHIVABLE_SHEETS: string[] = [SHEETS.POSTED, SHEETS.ERRORS];
 // Google スプレッドシートのシート名で使えない文字

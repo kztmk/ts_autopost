@@ -16,7 +16,7 @@ const NOTIFICATION_PROP_KEYS = {
 const DISCORD_WEBHOOK_URL_PATTERN =
   /^https:\/\/((?:ptb|canary)\.)?(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[A-Za-z0-9._-]+(\?[\w=&-]+)?$/;
 
-const APP_NAME = "Autopost";
+const APP_NAME = "翔（アキラ）";
 const COLOR_SUCCESS = 0x2ecc71; // green
 const COLOR_FAILURE = 0xe74c3c; // red
 const COLOR_MIXED = 0xf1c40f; // yellow

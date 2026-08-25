@@ -86,7 +86,7 @@ function jsonError(message: string, code: number = 400): GoogleAppsScript.Conten
 /** メニュー・ダイアログの表示文言（日英）。 */
 const UI_STRINGS = {
   ja: {
-    menuTitle: "Autopost 連携",
+    menuTitle: "翔（アキラ）連携",
     setupDeploy: "セットアップ（URL・本人確認コード）",
     updateRelease: "更新手順を表示",
     generateCode: "本人確認コードを生成（手動）",
@@ -99,7 +99,7 @@ const UI_STRINGS = {
     copiedLabel: "コピーしました",
   },
   en: {
-    menuTitle: "Autopost",
+    menuTitle: "Aqila",
     setupDeploy: "Set up (URL & code)",
     updateRelease: "Show update steps",
     generateCode: "Generate verification code (manual)",

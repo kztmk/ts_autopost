@@ -32,7 +32,7 @@ export function ensureSheet(
 
 /**
  * Posts / Posted / Errors シートを作成し、ヘッダー行を整える。
- * スプレッドシートメニュー「Autopost 連携 → シート初期化」から実行できる。
+ * スプレッドシートメニュー「翔（アキラ）連携 → シート初期化」から実行できる。
  */
 export function initializeSheets(): { created: string[]; ensured: string[] } {
   const created: string[] = [];

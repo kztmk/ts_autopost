@@ -44,7 +44,7 @@ const PLATFORM_HANDLERS: { [P in Platform]: PlatformHandler } = {
         post.accountId,
         post.contents,
         mediaUrls,
-        parentPostId ? getBlueskyReplyRef(parentPostId) : undefined
+        parentPostId ? getBlueskyReplyRef(post.accountId, parentPostId) : undefined
       ),
   },
   threads: {

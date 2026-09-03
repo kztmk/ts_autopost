@@ -24,13 +24,50 @@ function ensureSheetsInitialized(): void {
   specs.forEach((s) => ensureSheet(s.name, s.headers));
 }
 
-/** デプロイ済みならウェブアプリ /exec URL を返す（未デプロイ・取得不可なら空文字）。 */
-export function getDeployedWebAppUrl(): string {
+const WEB_APP_URL_OVERRIDE_PROP_KEY = "setup_webAppUrlOverride";
+// 個人Googleアカウント: https://script.google.com/macros/s/{id}/exec
+// Google Workspace（組織ドメイン）: https://script.google.com/a/{domain}/macros/s/{id}/exec
+const WEB_APP_URL_PATTERN =
+  /^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/.+\/exec$/;
+
+/**
+ * ScriptApp.getService().getUrl() は、Webアプリのデプロイが複数存在する場合に
+ * 実際とは異なる（古い・別の）デプロイのURLを返すことがある（GAS既知の制限）。
+ * ユーザーがデプロイ画面からコピーした正しいURLを手動保存できるようにしておき、
+ * 保存済みならそちらを自動取得より優先する。
+ */
+export function getWebAppUrlOverride(): string {
+  return (
+    PropertiesService.getScriptProperties().getProperty(WEB_APP_URL_OVERRIDE_PROP_KEY) || ""
+  );
+}
+
+function getAutoDetectedWebAppUrl(): string {
   try {
     return ScriptApp.getService().getUrl() || "";
   } catch (e) {
     return "";
   }
+}
+
+/** セットアップ画面の「このURLを保存」ボタンから呼ばれる（google.script.run）。 */
+export function saveWebAppUrlOverride(rawUrl: string): { saved: boolean; url: string } {
+  const url = String(rawUrl || "").trim();
+  if (!WEB_APP_URL_PATTERN.test(url)) {
+    throw new Error(
+      "正しいウェブアプリ URL（https://script.google.com/.../exec で終わるもの）を入力してください。"
+    );
+  }
+  PropertiesService.getScriptProperties().setProperty(WEB_APP_URL_OVERRIDE_PROP_KEY, url);
+  return { saved: true, url };
+}
+
+/**
+ * デプロイ済みならウェブアプリ /exec URL を返す（未デプロイ・取得不可なら空文字）。
+ * 手動保存されたURL（saveWebAppUrlOverride）があればそちらを自動取得より優先する。
+ */
+export function getDeployedWebAppUrl(): string {
+  return getWebAppUrlOverride() || getAutoDetectedWebAppUrl();
 }
 
 function escapeHtml(v: string): string {
@@ -59,9 +96,10 @@ export function deploySetup(): void {
   const ui = SpreadsheetApp.getUi();
   try {
     ensureSheetsInitialized();
-    const url = getDeployedWebAppUrl();
+    const override = getWebAppUrlOverride();
+    const url = override || getAutoDetectedWebAppUrl();
     const code = generateSetupCode();
-    showSetupDialog(url, code, s);
+    showSetupDialog(url, Boolean(override), code, s);
   } catch (e: any) {
     ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
   }
@@ -79,9 +117,14 @@ export function updateFromRelease(): void {
 }
 
 /** セットアップ（デプロイ確認＋URL＋本人確認コード）のダイアログ。 */
-function showSetupDialog(url: string, code: string, s: SetupStrings): void {
+function showSetupDialog(
+  url: string,
+  isOverride: boolean,
+  code: string,
+  s: SetupStrings
+): void {
   const urlValue = url || "";
-  const urlNote = url ? s.urlAutoNote : s.urlManualNote;
+  const urlNote = isOverride ? s.urlOverrideNote : url ? s.urlAutoNote : s.urlManualNote;
   const html = HtmlService.createHtmlOutput(
     `
     <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
@@ -91,12 +134,17 @@ function showSetupDialog(url: string, code: string, s: SetupStrings): void {
 
       <label style="font-size: 12px; font-weight: bold;">${s.webAppUrlLabel}</label>
       <div style="display:flex; gap:8px; margin: 4px 0 4px;">
-        <input id="url" type="text" readonly value="${escapeHtml(urlValue)}"
+        <input id="url" type="text" value="${escapeHtml(urlValue)}"
           placeholder="https://script.google.com/macros/s/.../exec"
           style="flex:1; padding:8px; font-size:13px; font-family:monospace;" />
         <button onclick="copyField('url')" style="padding:8px 10px; border:0; border-radius:4px; background:#1a73e8; color:#fff; cursor:pointer;">${s.copyLabel}</button>
       </div>
-      <p style="font-size:11px; color:#5f6368; margin:0 0 12px;">${urlNote}</p>
+      <p style="font-size:11px; color:#5f6368; margin:0 0 4px;">${urlNote}</p>
+      <p style="font-size:11px; color:#5f6368; margin:0 0 4px;">${s.urlOverrideHint}</p>
+      <div style="margin: 0 0 12px;">
+        <button onclick="saveUrl()" style="padding:6px 10px; border:1px solid #1a73e8; border-radius:4px; background:#fff; color:#1a73e8; cursor:pointer;">${s.saveUrlLabel}</button>
+        <span id="urlSaveStatus" style="margin-left:8px; font-size:12px;"></span>
+      </div>
 
       <label style="font-size: 12px; font-weight: bold;">${s.codeLabel}</label>
       <div style="display:flex; gap:8px; margin: 4px 0 8px;">
@@ -114,12 +162,28 @@ function showSetupDialog(url: string, code: string, s: SetupStrings): void {
           document.execCommand('copy');
           document.getElementById('status').textContent = ${JSON.stringify(s.copiedLabel)};
         }
+        function saveUrl(){
+          const el = document.getElementById('url');
+          const statusEl = document.getElementById('urlSaveStatus');
+          statusEl.style.color = '#5f6368';
+          statusEl.textContent = ${JSON.stringify(s.urlSaving)};
+          google.script.run
+            .withSuccessHandler(function(){
+              statusEl.style.color = '#188038';
+              statusEl.textContent = ${JSON.stringify(s.urlSaved)};
+            })
+            .withFailureHandler(function(error){
+              statusEl.style.color = '#c5221f';
+              statusEl.textContent = (error && error.message) ? error.message : ${JSON.stringify(s.urlSaveFailed)};
+            })
+            .saveWebAppUrlOverride(el.value);
+        }
       </script>
     </div>
     `
   )
     .setWidth(580)
-    .setHeight(520);
+    .setHeight(560);
   SpreadsheetApp.getUi().showModalDialog(html, s.setupTitle);
 }
 
@@ -146,6 +210,12 @@ interface SetupStrings {
   webAppUrlLabel: string;
   urlAutoNote: string;
   urlManualNote: string;
+  urlOverrideNote: string;
+  urlOverrideHint: string;
+  saveUrlLabel: string;
+  urlSaving: string;
+  urlSaved: string;
+  urlSaveFailed: string;
   codeLabel: string;
   copyLabel: string;
   copiedLabel: string;
@@ -174,6 +244,13 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
     urlAutoNote: "デプロイ済みのため自動取得しました。上のコピーで貼り付けてください。",
     urlManualNote:
       "自動取得できませんでした。先にデプロイし、シートを再読み込みしてから再実行するか、デプロイ画面の URL を貼り付けてください。",
+    urlOverrideNote: "以前保存した手動設定のURLを表示しています（自動取得より優先されます）。",
+    urlOverrideHint:
+      "※ Webアプリのデプロイが複数あると、自動取得したURLが実際のデプロイと異なることがあります。デプロイ画面に表示された正しいURLを上の欄に貼り付けて「このURLを保存」を押すと、次回以降はそちらが優先して表示されます。",
+    saveUrlLabel: "このURLを保存",
+    urlSaving: "保存中...",
+    urlSaved: "保存しました。次回以降はこのURLが表示されます。",
+    urlSaveFailed: "保存に失敗しました。URLの形式を確認してください。",
     codeLabel: "本人確認コード（アプリの「GAS 本人確認コード」欄）",
     copyLabel: "コピー",
     copiedLabel: "コピーしました",
@@ -205,6 +282,14 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
     urlAutoNote: "Detected automatically because it is already deployed. Copy it above and paste it.",
     urlManualNote:
       "Could not detect it automatically. Deploy first and reload the sheet, then run again, or paste the URL from the deploy screen.",
+    urlOverrideNote:
+      "Showing a previously saved manual URL (this takes priority over auto-detection).",
+    urlOverrideHint:
+      "Note: if there is more than one Web app deployment, the auto-detected URL can differ from the one actually in use. Paste the correct URL shown on the deploy screen above and click \"Save this URL\" to make it take priority from now on.",
+    saveUrlLabel: "Save this URL",
+    urlSaving: "Saving...",
+    urlSaved: "Saved. This URL will be shown from now on.",
+    urlSaveFailed: "Failed to save. Please check the URL format.",
     codeLabel: "Verification code (the app's \"GAS verification code\" field)",
     copyLabel: "Copy",
     copiedLabel: "Copied",

@@ -1,4 +1,5 @@
 import { SHEETS, HEADERS } from "./constants";
+import { t } from "./utils";
 
 /**
  * 指定名のシートを取得し、無ければ作成する。
@@ -11,7 +12,10 @@ export function ensureSheet(
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) {
     throw new Error(
-      "アクティブなスプレッドシートが見つかりません。コンテナバインドの GAS プロジェクトから実行してください。"
+      t(
+        "アクティブなスプレッドシートが見つかりません。コンテナバインドの GAS プロジェクトから実行してください。",
+        "No active spreadsheet found. Run this from a container-bound GAS project."
+      )
     );
   }
 

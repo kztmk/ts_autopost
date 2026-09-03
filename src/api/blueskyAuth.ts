@@ -6,8 +6,60 @@
 import { BlueskyAccount, Engagement } from "../types";
 import { maskSensitive, fetchWithRetries, requireNonEmptyString, filterImageUrls } from "../utils";
 
+// bsky.social はBlueskyが運営する既定のPDSだが、AT Protocolはハンドルごとに
+// 別のPDS（セルフホスト含む）へ所属できる。ハンドル解決はどのPDS/AppViewに投げても
+// ネットワーク全体を解決できるため、既定値をリゾルバとして使う。
 const BSKY_SERVICE = "https://bsky.social";
 const BSKY_ACCOUNT_PREFIX = "BLUESKY_ACCOUNT_";
+
+/** account.pdsUrl があればそれを、無ければ bsky.social にフォールバックする（旧データ互換）。 */
+function pdsBaseUrl(account: BlueskyAccount): string {
+  return account.pdsUrl || BSKY_SERVICE;
+}
+
+/** ハンドルをDIDへ解決する。どのPDS/AppViewでもネットワーク全体を解決できるため既定値で呼ぶ。 */
+function resolveHandleToDid(handle: string): string {
+  const res = fetchWithRetries(
+    `${BSKY_SERVICE}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`,
+    { muteHttpExceptions: true }
+  );
+  const data = JSON.parse(res.getContentText());
+  if (!data.did) {
+    throw new Error(`ハンドルの解決に失敗しました (${handle}): ${JSON.stringify(data)}`);
+  }
+  return data.did;
+}
+
+/** DIDドキュメントを取得し、#atproto_pds サービスの実際のPDS URLを返す。 */
+function resolveDidToPdsUrl(did: string): string {
+  let docUrl: string;
+  if (did.indexOf("did:plc:") === 0) {
+    docUrl = `https://plc.directory/${encodeURIComponent(did)}`;
+  } else if (did.indexOf("did:web:") === 0) {
+    docUrl = `https://${did.substring("did:web:".length)}/.well-known/did.json`;
+  } else {
+    throw new Error(`未対応のDID形式です: ${did}`);
+  }
+  const res = fetchWithRetries(docUrl, { muteHttpExceptions: true });
+  const doc = JSON.parse(res.getContentText());
+  const services: any[] = Array.isArray(doc.service) ? doc.service : [];
+  const pds = services.find(
+    (svc) => svc.id === "#atproto_pds" || svc.type === "AtprotoPersonalDataServer"
+  );
+  if (!pds || !pds.serviceEndpoint) {
+    throw new Error(`PDSの解決に失敗しました (did=${did}): ${JSON.stringify(doc)}`);
+  }
+  return String(pds.serviceEndpoint).replace(/\/$/, "");
+}
+
+/**
+ * ハンドルが実際に所属するPDSのベースURLを解決する（ログイン時にのみ呼び、結果を
+ * account.pdsUrl として保存する。以後はキャッシュ済みの値を使い、毎回解決しない）。
+ */
+function resolvePdsUrl(handle: string): string {
+  const did = resolveHandleToDid(handle);
+  return resolveDidToPdsUrl(did);
+}
 
 function accountKey(accountId: string): string {
   return BSKY_ACCOUNT_PREFIX + accountId;
@@ -45,9 +97,15 @@ function maskAccount(account: BlueskyAccount) {
 
 // ---- セッション管理 ----
 
-/** createSession（ログイン）。did / accessJwt / refreshJwt を取得して保存する */
+/**
+ * createSession（ログイン）。did / accessJwt / refreshJwt を取得して保存する。
+ * account.pdsUrl が未設定（新規登録・ハンドル変更後）ならハンドルから解決して保存する。
+ * bsky.social 以外のPDS（セルフホスト含む）に所属するアカウントも、これで認証先を
+ * 正しいPDSに向けられる（固定で bsky.social に送ると "Invalid identifier or password" になる）。
+ */
 export function blueskyLogin(account: BlueskyAccount): BlueskyAccount {
-  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.server.createSession`, {
+  const pdsUrl = account.pdsUrl || resolvePdsUrl(account.handle);
+  const res = fetchWithRetries(`${pdsUrl}/xrpc/com.atproto.server.createSession`, {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify({ identifier: account.handle, password: account.appPassword }),
@@ -57,6 +115,7 @@ export function blueskyLogin(account: BlueskyAccount): BlueskyAccount {
   if (!data.accessJwt) {
     throw new Error(`Bluesky ログインに失敗しました (${account.accountId}): ${JSON.stringify(data)}`);
   }
+  account.pdsUrl = pdsUrl;
   account.did = data.did;
   account.accessJwt = data.accessJwt;
   account.refreshJwt = data.refreshJwt;
@@ -69,7 +128,7 @@ function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
   if (!account.refreshJwt) {
     throw new Error("No refreshJwt to refresh.");
   }
-  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.server.refreshSession`, {
+  const res = fetchWithRetries(`${pdsBaseUrl(account)}/xrpc/com.atproto.server.refreshSession`, {
     method: "post",
     headers: { Authorization: "Bearer " + account.refreshJwt },
     muteHttpExceptions: true,
@@ -135,7 +194,7 @@ function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
       `画像サイズが Bluesky の上限(${BLUESKY_MAX_BLOB_BYTES} bytes)を超えています (${bytes.length} bytes): ${imageUrl}`
     );
   }
-  const res = fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.repo.uploadBlob`, {
+  const res = fetchWithRetries(`${pdsBaseUrl(account)}/xrpc/com.atproto.repo.uploadBlob`, {
     method: "post",
     contentType: mime,
     headers: { Authorization: "Bearer " + account.accessJwt },
@@ -177,7 +236,7 @@ function createRecordRequest(
     collection: "app.bsky.feed.post",
     record,
   };
-  return fetchWithRetries(`${BSKY_SERVICE}/xrpc/com.atproto.repo.createRecord`, {
+  return fetchWithRetries(`${pdsBaseUrl(account)}/xrpc/com.atproto.repo.createRecord`, {
     method: "post",
     contentType: "application/json",
     headers: { Authorization: "Bearer " + account.accessJwt },
@@ -259,12 +318,15 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
  * 親投稿の AT URI から、子のリプライに使う root/parent 参照（uri+cid）を得る。
  * getRecord は PDS の即時整合な公開読み取りなので、同一ラン内で直前に作った親でも参照でき
  * （appview のインデックス遅延を避ける）、認証不要（accessJwt 失効の影響を受けない）。
+ * ただし getRecord はその repo(did) を実際にホストする PDS へ問い合わせる必要があるため、
+ * 投稿元アカウントの pdsUrl（bsky.social 以外のセルフホストPDS等）を使う。
  * 親自身が返す reply.root からスレッド root を導く。
  */
-export function getBlueskyReplyRef(parentUri: string): BlueskyReplyRef {
+export function getBlueskyReplyRef(accountId: string, parentUri: string): BlueskyReplyRef {
+  const account = loadBlueskyAccount(accountId);
   const { repo, collection, rkey } = parseAtUri(parentUri);
   const url =
-    `${BSKY_SERVICE}/xrpc/com.atproto.repo.getRecord` +
+    `${pdsBaseUrl(account)}/xrpc/com.atproto.repo.getRecord` +
     `?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`;
   const res = fetchWithRetries(url, { muteHttpExceptions: true });
   const data = JSON.parse(res.getContentText());
@@ -321,6 +383,7 @@ export function updateBlueskyAuth(data: any) {
   let credsChanged = false;
   if (data?.handle && String(data.handle).trim() !== account.handle) {
     account.handle = String(data.handle).trim();
+    account.pdsUrl = undefined; // ハンドル変更時は所属PDSが変わりうるため再解決させる
     credsChanged = true;
   }
   if (data?.appPassword && String(data.appPassword).trim() !== account.appPassword) {

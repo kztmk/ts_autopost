@@ -33,21 +33,14 @@ const WEB_APP_URL_PATTERN =
 /**
  * ScriptApp.getService().getUrl() は、Webアプリのデプロイが複数存在する場合に
  * 実際とは異なる（古い・別の）デプロイのURLを返すことがある（GAS既知の制限）。
- * ユーザーがデプロイ画面からコピーした正しいURLを手動保存できるようにしておき、
- * 保存済みならそちらを自動取得より優先する。
+ * 信頼できないため表示には一切使わない。ユーザーがデプロイ画面からコピーした
+ * 正しいURLを手動保存してもらい、保存済みならそれだけを表示する
+ * （未保存なら空欄のまま。自動取得へのフォールバックはしない）。
  */
 export function getWebAppUrlOverride(): string {
   return (
     PropertiesService.getScriptProperties().getProperty(WEB_APP_URL_OVERRIDE_PROP_KEY) || ""
   );
-}
-
-function getAutoDetectedWebAppUrl(): string {
-  try {
-    return ScriptApp.getService().getUrl() || "";
-  } catch (e) {
-    return "";
-  }
 }
 
 /** セットアップ画面の「このURLを保存」ボタンから呼ばれる（google.script.run）。 */
@@ -63,11 +56,11 @@ export function saveWebAppUrlOverride(rawUrl: string): { saved: boolean; url: st
 }
 
 /**
- * デプロイ済みならウェブアプリ /exec URL を返す（未デプロイ・取得不可なら空文字）。
- * 手動保存されたURL（saveWebAppUrlOverride）があればそちらを自動取得より優先する。
+ * 保存済みのウェブアプリ /exec URL を返す（未保存なら空文字）。
+ * ScriptApp.getService().getUrl() の自動取得は信頼できないため使わない。
  */
 export function getDeployedWebAppUrl(): string {
-  return getWebAppUrlOverride() || getAutoDetectedWebAppUrl();
+  return getWebAppUrlOverride();
 }
 
 function escapeHtml(v: string): string {
@@ -88,18 +81,18 @@ function stepsToOl(steps: string[]): string {
 // ---- メニューから呼ばれるエントリポイント ----
 
 /**
- * セットアップ。デプロイ確認チェックリスト＋ウェブアプリURL（自動取得）＋本人確認コードを表示。
- * 想定運用: 先にデプロイ済み → この時点でURLが自動取得できる。
+ * セットアップ。デプロイ確認チェックリスト＋ウェブアプリURL＋本人確認コードを表示。
+ * URLは自動取得せず、保存済み（saveWebAppUrlOverride）があればそれだけを表示する。
+ * 未保存なら空欄のまま。デプロイ画面の正しいURLを貼り付けて保存してもらう。
  */
 export function deploySetup(): void {
   const s = SETUP_STRINGS[getUiLang()];
   const ui = SpreadsheetApp.getUi();
   try {
     ensureSheetsInitialized();
-    const override = getWebAppUrlOverride();
-    const url = override || getAutoDetectedWebAppUrl();
+    const url = getWebAppUrlOverride();
     const code = generateSetupCode();
-    showSetupDialog(url, Boolean(override), code, s);
+    showSetupDialog(url, Boolean(url), code, s);
   } catch (e: any) {
     ui.alert(s.errorTitle, `${s.errorBody}\n\n${e && e.message ? e.message : e}`, ui.ButtonSet.OK);
   }
@@ -124,7 +117,7 @@ function showSetupDialog(
   s: SetupStrings
 ): void {
   const urlValue = url || "";
-  const urlNote = isOverride ? s.urlOverrideNote : url ? s.urlAutoNote : s.urlManualNote;
+  const urlNote = isOverride ? s.urlOverrideNote : s.urlManualNote;
   const html = HtmlService.createHtmlOutput(
     `
     <div style="font-family: Arial, sans-serif; padding: 16px; color: #202124;">
@@ -208,7 +201,6 @@ interface SetupStrings {
   setupChecklistLead: string;
   deploySteps: string[];
   webAppUrlLabel: string;
-  urlAutoNote: string;
   urlManualNote: string;
   urlOverrideNote: string;
   urlOverrideHint: string;
@@ -238,15 +230,14 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
       "「種類の選択（歯車）→ ウェブアプリ」を選択。",
       "「デプロイ」→「アクセスを承認」→ Google の確認画面で許可（「すべて選択」→続行）。",
       "表示された「ウェブアプリ URL」（.../exec）をコピー。",
-      "シートに戻り、再読み込みしてからこのメニューを実行（下に URL が自動表示されます）。",
+      "シートに戻り、再読み込みしてからこのメニューを実行し、下の欄にコピーしたURLを貼り付けて保存する。",
     ],
     webAppUrlLabel: "ウェブアプリ URL（アプリの「Google Sheets URL」欄）",
-    urlAutoNote: "デプロイ済みのため自動取得しました。上のコピーで貼り付けてください。",
     urlManualNote:
-      "自動取得できませんでした。先にデプロイし、シートを再読み込みしてから再実行するか、デプロイ画面の URL を貼り付けてください。",
-    urlOverrideNote: "以前保存した手動設定のURLを表示しています（自動取得より優先されます）。",
+      "URLは自動取得しません（デプロイが複数あると誤ったURLになるため）。デプロイ画面に表示された正しいURL（.../exec）を上の欄に貼り付けて「このURLを保存」を押してください。",
+    urlOverrideNote: "以前保存したURLを表示しています。",
     urlOverrideHint:
-      "※ Webアプリのデプロイが複数あると、自動取得したURLが実際のデプロイと異なることがあります。デプロイ画面に表示された正しいURLを上の欄に貼り付けて「このURLを保存」を押すと、次回以降はそちらが優先して表示されます。",
+      "※ デプロイをやり直した、または別のデプロイのURLを使いたい場合は、上の欄を正しいURLに書き換えて「このURLを保存」を押してください。",
     saveUrlLabel: "このURLを保存",
     urlSaving: "保存中...",
     urlSaved: "保存しました。次回以降はこのURLが表示されます。",
@@ -276,16 +267,14 @@ const SETUP_STRINGS: Record<"ja" | "en", SetupStrings> = {
       "Click \"Select type\" (gear) → choose \"Web app\".",
       "Click \"Deploy\" → \"Authorize access\" → allow on Google's screen (\"Select all\" → Continue).",
       "Copy the shown \"Web app URL\" (.../exec).",
-      "Return to the sheet, reload it, then run this menu (the URL appears below automatically).",
+      "Return to the sheet, reload it, run this menu, then paste the copied URL below and save it.",
     ],
     webAppUrlLabel: "Web app URL (the app's \"Google Sheets URL\" field)",
-    urlAutoNote: "Detected automatically because it is already deployed. Copy it above and paste it.",
     urlManualNote:
-      "Could not detect it automatically. Deploy first and reload the sheet, then run again, or paste the URL from the deploy screen.",
-    urlOverrideNote:
-      "Showing a previously saved manual URL (this takes priority over auto-detection).",
+      "The URL is not auto-detected (it can be wrong when there is more than one deployment). Paste the correct URL (.../exec) shown on the deploy screen above and click \"Save this URL\".",
+    urlOverrideNote: "Showing the URL you saved previously.",
     urlOverrideHint:
-      "Note: if there is more than one Web app deployment, the auto-detected URL can differ from the one actually in use. Paste the correct URL shown on the deploy screen above and click \"Save this URL\" to make it take priority from now on.",
+      "Note: if you redeploy or want to use a different deployment's URL, edit the field above and click \"Save this URL\" again.",
     saveUrlLabel: "Save this URL",
     urlSaving: "Saving...",
     urlSaved: "Saved. This URL will be shown from now on.",

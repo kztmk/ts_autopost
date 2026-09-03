@@ -1,7 +1,7 @@
 // 投稿トリガー（時間ベース）の管理。ハンドラは posting.ts の autoPost。
 
 import { VERSION } from "../constants";
-import { deleteTriggersByHandler } from "../utils";
+import { deleteTriggersByHandler, t } from "../utils";
 
 export const POSTING_HANDLER = "autoPost";
 export const ENGAGEMENT_HANDLER = "updateAllEngagement";
@@ -17,7 +17,12 @@ const VALID_INTERVALS = [1, 5, 10, 15, 30];
 function ensureDailyTrigger(handler: string) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
-    throw new Error(`トリガー作成のロックを取得できませんでした: ${handler}`);
+    throw new Error(
+      t(
+        `トリガー作成のロックを取得できませんでした: ${handler}`,
+        `Could not acquire the trigger creation lock: ${handler}`
+      )
+    );
   }
   try {
     const exists = ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === handler);
@@ -49,7 +54,10 @@ export function createPostingTrigger(data: any) {
   const intervalMinutes = data?.intervalMinutes;
   if (VALID_INTERVALS.indexOf(intervalMinutes) === -1) {
     throw new Error(
-      `Invalid interval: must be one of ${VALID_INTERVALS.join(", ")} (GAS everyMinutes の制約).`
+      t(
+        `不正な interval です: 次のいずれかにしてください ${VALID_INTERVALS.join(", ")}（GAS everyMinutes の制約）。`,
+        `Invalid interval: must be one of ${VALID_INTERVALS.join(", ")} (GAS everyMinutes constraint).`
+      )
     );
   }
 
@@ -96,7 +104,9 @@ export function deleteEngagementTrigger() {
 export function checkTriggerExists(functionName: string) {
   const name = String(functionName || "").trim();
   if (!name) {
-    throw new Error("Missing required parameter: functionName.");
+    throw new Error(
+      t("必須パラメータがありません: functionName。", "Missing required parameter: functionName.")
+    );
   }
   const props = PropertiesService.getScriptProperties();
   let triggerFound = false;

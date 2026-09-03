@@ -19,6 +19,7 @@ import {
   filterImageUrls,
   getUiLang,
   normalizeLang,
+  t,
 } from "../utils";
 
 /**
@@ -76,7 +77,9 @@ function threadsAccountKey(accountId: string): string {
 function loadThreadsAccount(accountId: string): ThreadsAccount {
   const raw = PropertiesService.getScriptProperties().getProperty(threadsAccountKey(accountId));
   if (!raw) {
-    throw new Error(`Threads account not found: ${accountId}`);
+    throw new Error(
+      t(`Threads アカウントが見つかりません: ${accountId}`, `Threads account not found: ${accountId}`)
+    );
   }
   return JSON.parse(raw) as ThreadsAccount;
 }
@@ -113,12 +116,17 @@ export function getThreadsPermalink(data: any): { permalink: string } {
   const postId = requireNonEmptyString(data?.postId, "postId");
   const account = loadThreadsAccount(accountId);
   if (!account.accessToken) {
-    throw new Error(`Threads は未認可です: ${accountId}`);
+    throw new Error(t(`Threads は未認可です: ${accountId}`, `Threads is not authorized: ${accountId}`));
   }
   const url =
     `${THREADS_GRAPH_V1}/${encodeURIComponent(postId)}` +
     `?fields=permalink&access_token=${encodeURIComponent(account.accessToken)}`;
-  const res = fetchThreadsJson("パーマリンク取得", url, { method: "get" }, "permalink");
+  const res = fetchThreadsJson(
+    { ja: "パーマリンク取得", en: "retrieve permalink" },
+    url,
+    { method: "get" },
+    "permalink"
+  );
   return { permalink: String(res.permalink) };
 }
 
@@ -127,7 +135,12 @@ function fetchThreadsUsername(accessToken: string): string {
   const url =
     `${THREADS_GRAPH_V1}/${THREADS_ME}` +
     `?fields=username&access_token=${encodeURIComponent(accessToken)}`;
-  const data = fetchThreadsJson("ユーザー名取得", url, { method: "get" }, "username");
+  const data = fetchThreadsJson(
+    { ja: "ユーザー名取得", en: "retrieve username" },
+    url,
+    { method: "get" },
+    "username"
+  );
   return String(data.username);
 }
 
@@ -140,7 +153,9 @@ export function createThreadsAuth(data: any) {
   const appSecret = requireNonEmptyString(data?.appSecret, "appSecret");
 
   if (PropertiesService.getScriptProperties().getProperty(threadsAccountKey(accountId))) {
-    throw new Error(`Threads account already exists: ${accountId}`);
+    throw new Error(
+      t(`Threads アカウントは既に存在します: ${accountId}`, `Threads account already exists: ${accountId}`)
+    );
   }
 
   const account: ThreadsAccount = {
@@ -219,7 +234,12 @@ export function deleteThreadsAuth(data: any) {
 function getRedirectUri(): string {
   const url = ScriptApp.getService().getUrl();
   if (!url) {
-    throw new Error("Web アプリの URL を取得できません。デプロイ済みか確認してください。");
+    throw new Error(
+      t(
+        "Web アプリの URL を取得できません。デプロイ済みか確認してください。",
+        "Could not get the Web App URL. Check that it has been deployed."
+      )
+    );
   }
   return url;
 }
@@ -291,7 +311,7 @@ function callbackHtml(title: string, bodyHtml: string): GoogleAppsScript.HTML.Ht
  * 無認証ページには出さないこと）。
  */
 function fetchThreadsJson(
-  label: string,
+  label: { ja: string; en: string },
   url: string,
   options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions,
   requiredField: string
@@ -299,14 +319,16 @@ function fetchThreadsJson(
   const res = fetchWithRetries(url, { ...options, muteHttpExceptions: true });
   const data = JSON.parse(res.getContentText());
   if (!data[requiredField]) {
-    throw new Error(`${label}に失敗: ${JSON.stringify(data)}`);
+    throw new Error(
+      t(`${label.ja}に失敗: ${JSON.stringify(data)}`, `Failed to ${label.en}: ${JSON.stringify(data)}`)
+    );
   }
   return data;
 }
 
 /** トークン系エンドポイント用（access_token 必須） */
 function fetchThreadsToken(
-  label: string,
+  label: { ja: string; en: string },
   url: string,
   options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions
 ): any {
@@ -345,20 +367,24 @@ export function handleThreadsOAuthCallback(e: any): GoogleAppsScript.HTML.HtmlOu
     const account = loadThreadsAccount(accountId);
 
     // ① 認可コード → 短期アクセストークン
-    const shortData = fetchThreadsToken("短期トークン取得", `${THREADS_GRAPH}/oauth/access_token`, {
-      method: "post",
-      payload: {
-        client_id: account.appId,
-        client_secret: account.appSecret,
-        grant_type: "authorization_code",
-        redirect_uri: redirectUri,
-        code: String(p.code),
-      },
-    });
+    const shortData = fetchThreadsToken(
+      { ja: "短期トークン取得", en: "retrieve short-lived token" },
+      `${THREADS_GRAPH}/oauth/access_token`,
+      {
+        method: "post",
+        payload: {
+          client_id: account.appId,
+          client_secret: account.appSecret,
+          grant_type: "authorization_code",
+          redirect_uri: redirectUri,
+          code: String(p.code),
+        },
+      }
+    );
 
     // ② 短期 → 長期アクセストークン（60 日）
     const longData = fetchThreadsToken(
-      "長期トークン取得",
+      { ja: "長期トークン取得", en: "retrieve long-lived token" },
       `${THREADS_GRAPH}/access_token` +
         `?grant_type=th_exchange_token` +
         `&client_secret=${encodeURIComponent(account.appSecret)}` +
@@ -446,7 +472,7 @@ export function threadsTokenMaintenance(): void {
 
     try {
       const data = fetchThreadsToken(
-        "トークン更新",
+        { ja: "トークン更新", en: "refresh token" },
         `${THREADS_GRAPH}/refresh_access_token` +
           `?grant_type=th_refresh_token` +
           `&access_token=${encodeURIComponent(account.accessToken)}`,
@@ -497,7 +523,12 @@ type AuthorizedThreadsAccount = ThreadsAccount & {
 function loadAuthorizedThreadsAccount(accountId: string): AuthorizedThreadsAccount {
   const account = loadThreadsAccount(accountId);
   if (!account.accessToken || !account.userId) {
-    throw new Error(`Threads account not authorized: ${accountId}. 再認可が必要です。`);
+    throw new Error(
+      t(
+        `Threads アカウントが未認可です: ${accountId}。再認可が必要です。`,
+        `Threads account not authorized: ${accountId}. Re-authorization is required.`
+      )
+    );
   }
   return account as AuthorizedThreadsAccount;
 }
@@ -509,7 +540,7 @@ function loadAuthorizedThreadsAccount(accountId: string): AuthorizedThreadsAccou
  */
 function createThreadsMediaContainer(
   account: AuthorizedThreadsAccount,
-  label: string,
+  label: { ja: string; en: string },
   payload: { [key: string]: string }
 ): string {
   const data = fetchThreadsJson(
@@ -543,20 +574,31 @@ function waitForContainerFinished(
     if (status === "FINISHED" || status === "PUBLISHED") return;
     if (status === "ERROR" || status === "EXPIRED") {
       throw new Error(
-        `Threads コンテナが ${status}: ${data.error_message || JSON.stringify(data)}`
+        t(
+          `Threads コンテナが ${status}: ${data.error_message || JSON.stringify(data)}`,
+          `Threads container is ${status}: ${data.error_message || JSON.stringify(data)}`
+        )
       );
     }
     if (status !== "IN_PROGRESS") {
       // status 欠落や未知値はエラー応答とみなし、空ポーリングで原因を握り潰さず即失敗させる
       // （タイムアウトの汎用メッセージではなく実レスポンスを Errors に残す）。
-      throw new Error(`Threads コンテナ状態が不明: ${JSON.stringify(data)}`);
+      throw new Error(
+        t(
+          `Threads コンテナ状態が不明: ${JSON.stringify(data)}`,
+          `Unknown Threads container status: ${JSON.stringify(data)}`
+        )
+      );
     }
     if (i < CONTAINER_POLL_ATTEMPTS - 1) {
       Utilities.sleep(CONTAINER_POLL_INTERVAL_MS);
     }
   }
   throw new Error(
-    `Threads コンテナが ${(CONTAINER_POLL_ATTEMPTS * CONTAINER_POLL_INTERVAL_MS) / 1000}秒以内に FINISHED になりませんでした。`
+    t(
+      `Threads コンテナが ${(CONTAINER_POLL_ATTEMPTS * CONTAINER_POLL_INTERVAL_MS) / 1000}秒以内に FINISHED になりませんでした。`,
+      `Threads container did not reach FINISHED within ${(CONTAINER_POLL_ATTEMPTS * CONTAINER_POLL_INTERVAL_MS) / 1000} seconds.`
+    )
   );
 }
 
@@ -566,7 +608,7 @@ function publishThreadsContainer(
   creationId: string
 ): string {
   const data = fetchThreadsJson(
-    "Threads 公開",
+    { ja: "Threads 公開", en: "publish to Threads" },
     `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publish`,
     {
       method: "post",
@@ -597,37 +639,58 @@ export function postToThreads(
 
   let containerId: string;
   if (images.length === 0) {
-    containerId = createThreadsMediaContainer(account, "Threads コンテナ作成", {
-      media_type: "TEXT",
-      text,
-      ...replyField,
-    });
+    containerId = createThreadsMediaContainer(
+      account,
+      { ja: "Threads コンテナ作成", en: "create Threads container" },
+      {
+        media_type: "TEXT",
+        text,
+        ...replyField,
+      }
+    );
   } else if (images.length === 1) {
-    containerId = createThreadsMediaContainer(account, "Threads 画像コンテナ作成", {
-      media_type: "IMAGE",
-      image_url: images[0],
-      text,
-      ...replyField,
-    });
+    containerId = createThreadsMediaContainer(
+      account,
+      { ja: "Threads 画像コンテナ作成", en: "create Threads image container" },
+      {
+        media_type: "IMAGE",
+        image_url: images[0],
+        text,
+        ...replyField,
+      }
+    );
   } else {
     if (images.length > THREADS_MAX_CAROUSEL) {
-      throw new Error(`Threads カルーセルは ${THREADS_MAX_CAROUSEL} 枚までです（${images.length} 枚指定）`);
+      throw new Error(
+        t(
+          `Threads カルーセルは ${THREADS_MAX_CAROUSEL} 枚までです（${images.length} 枚指定）`,
+          `Threads carousel allows up to ${THREADS_MAX_CAROUSEL} images (${images.length} specified)`
+        )
+      );
     }
     // 各子コンテナを作成し、すべて FINISHED になってからカルーセル本体を作る
     const childIds = images.map((url) =>
-      createThreadsMediaContainer(account, "Threads カルーセル項目作成", {
-        media_type: "IMAGE",
-        image_url: url,
-        is_carousel_item: "true",
-      })
+      createThreadsMediaContainer(
+        account,
+        { ja: "Threads カルーセル項目作成", en: "create Threads carousel item" },
+        {
+          media_type: "IMAGE",
+          image_url: url,
+          is_carousel_item: "true",
+        }
+      )
     );
     childIds.forEach((id) => waitForContainerFinished(account, id));
-    containerId = createThreadsMediaContainer(account, "Threads カルーセルコンテナ作成", {
-      media_type: "CAROUSEL",
-      children: childIds.join(","),
-      text,
-      ...replyField,
-    });
+    containerId = createThreadsMediaContainer(
+      account,
+      { ja: "Threads カルーセルコンテナ作成", en: "create Threads carousel container" },
+      {
+        media_type: "CAROUSEL",
+        children: childIds.join(","),
+        text,
+        ...replyField,
+      }
+    );
   }
 
   waitForContainerFinished(account, containerId);
@@ -644,7 +707,7 @@ export function getThreadsPublishingLimit(accountId: string): {
 } {
   const account = loadAuthorizedThreadsAccount(accountId);
   const data = fetchThreadsJson(
-    "レート制限情報の取得",
+    { ja: "レート制限情報の取得", en: "retrieve rate limit information" },
     `${THREADS_GRAPH_V1}/${THREADS_ME}/threads_publishing_limit` +
       `?fields=quota_usage,config&access_token=${encodeURIComponent(account.accessToken)}`,
     {},
@@ -652,7 +715,12 @@ export function getThreadsPublishingLimit(accountId: string): {
   );
   const d = data.data[0];
   if (!d) {
-    throw new Error(`レート制限情報の取得に失敗: ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `レート制限情報の取得に失敗: ${JSON.stringify(data)}`,
+        `Failed to retrieve rate limit information: ${JSON.stringify(data)}`
+      )
+    );
   }
   return {
     quotaUsage: d.quota_usage || 0,
@@ -704,7 +772,12 @@ export function getThreadsPostInsights(accountId: string, mediaId: string): Enga
   );
   const data = JSON.parse(res.getContentText());
   if (!data.data) {
-    throw new Error(`Threads インサイト取得に失敗 (${mediaId}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Threads インサイト取得に失敗 (${mediaId}): ${JSON.stringify(data)}`,
+        `Failed to retrieve Threads insights (${mediaId}): ${JSON.stringify(data)}`
+      )
+    );
   }
   const m = foldInsights(data);
   return {
@@ -727,7 +800,12 @@ export function getThreadsAccountInsights(accountId: string): { [key: string]: n
   );
   const data = JSON.parse(res.getContentText());
   if (!data.data) {
-    throw new Error(`Threads アカウントインサイト取得に失敗: ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Threads アカウントインサイト取得に失敗: ${JSON.stringify(data)}`,
+        `Failed to retrieve Threads account insights: ${JSON.stringify(data)}`
+      )
+    );
   }
   return foldInsights(data);
 }

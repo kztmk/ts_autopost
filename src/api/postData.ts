@@ -4,7 +4,7 @@
 import { SHEETS, HEADERS } from "../constants";
 import { ensureSheet } from "../sheets";
 import { PostInput, PostRow, Platform } from "../types";
-import { newId, requireNonEmptyString, filterImageUrls } from "../utils";
+import { newId, requireNonEmptyString, filterImageUrls, t } from "../utils";
 
 const VALID_PLATFORMS: Platform[] = ["threads", "bluesky"];
 
@@ -47,8 +47,8 @@ function buildPostRow(input: PostInput, groupId: string): PostRow {
   const platform = normalizePlatform(input.platform);
   const accountId = String(input.accountId || "").trim();
   const contents = String(input.contents ?? "");
-  if (!accountId) throw new Error("Missing required field: accountId.");
-  if (!contents) throw new Error("Missing required field: contents.");
+  if (!accountId) throw new Error(t("必須項目がありません: accountId。", "Missing required field: accountId."));
+  if (!contents) throw new Error(t("必須項目がありません: contents。", "Missing required field: contents."));
 
   return {
     id: newId(),
@@ -69,7 +69,12 @@ function buildPostRow(input: PostInput, groupId: string): PostRow {
 function normalizePlatform(value: any): Platform {
   const p = String(value || "").trim().toLowerCase();
   if (VALID_PLATFORMS.indexOf(p as Platform) === -1) {
-    throw new Error(`Invalid platform: '${value}'. Must be one of ${VALID_PLATFORMS.join(", ")}.`);
+    throw new Error(
+      t(
+        `不正な platform です: '${value}'。次のいずれかにしてください: ${VALID_PLATFORMS.join(", ")}。`,
+        `Invalid platform: '${value}'. Must be one of ${VALID_PLATFORMS.join(", ")}.`
+      )
+    );
   }
   return p as Platform;
 }
@@ -93,7 +98,7 @@ export function createPost(input: PostInput): PostRow {
  */
 export function createMultiplePosts(inputs: PostInput[]): PostRow[] {
   if (!Array.isArray(inputs) || inputs.length === 0) {
-    throw new Error("posts must be a non-empty array.");
+    throw new Error(t("postsは空でない配列である必要があります。", "posts must be a non-empty array."));
   }
   const groupId = newId();
   return inputs.map((input) => {
@@ -120,7 +125,7 @@ export function deletePostsByIds(ids: string[]): number {
 /** 1 件の Post を削除する（API 用） */
 export function deletePost(data: any) {
   const id = String(data?.id || "").trim();
-  if (!id) throw new Error("Missing required field: id.");
+  if (!id) throw new Error(t("必須項目がありません: id。", "Missing required field: id."));
   const deleted = deletePostsByIds([id]);
   return { id, deleted: deleted > 0 };
 }
@@ -168,7 +173,12 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
   updated: number;
 } {
   if (!Array.isArray(updates) || updates.length === 0) {
-    throw new Error("updates must be a non-empty array of { id, inReplyTo }.");
+    throw new Error(
+      t(
+        "updatesは{ id, inReplyTo }の空でない配列である必要があります。",
+        "updates must be a non-empty array of { id, inReplyTo }."
+      )
+    );
   }
   const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
   const map = indexMap(HEADERS.POST_HEADERS);
@@ -187,23 +197,34 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
     const parentId = String(u?.inReplyTo ?? "").trim();
     const target = rowById[id];
     if (!target) {
-      throw new Error(`Post not found in Posts: ${id}`);
+      throw new Error(t(`Postが見つかりません(Posts): ${id}`, `Post not found in Posts: ${id}`));
     }
     if (!parentId) {
       applied[id] = ""; // ルート化
       return;
     }
     if (parentId === id) {
-      throw new Error(`inReplyTo が自己参照しています: ${id}`);
+      throw new Error(
+        t(`inReplyTo が自己参照しています: ${id}`, `inReplyTo refers to itself: ${id}`)
+      );
     }
     const parent = rowById[parentId] || postedById[parentId];
     if (!parent) {
-      throw new Error(`親 Post が見つかりません（Posts/Posted とも）: ${parentId}`);
+      throw new Error(
+        t(
+          `親 Post が見つかりません（Posts/Posted とも）: ${parentId}`,
+          `Parent post not found (in either Posts or Posted): ${parentId}`
+        )
+      );
     }
     if (parent.platform !== target.platform || parent.accountId !== target.accountId) {
       throw new Error(
-        `親子の PlatformAccount が一致しません` +
-          `（親=${parent.platform}/${parent.accountId} 子=${target.platform}/${target.accountId}）`
+        t(
+          `親子の PlatformAccount が一致しません` +
+            `（親=${parent.platform}/${parent.accountId} 子=${target.platform}/${target.accountId}）`,
+          `Parent and child PlatformAccount do not match` +
+            ` (parent=${parent.platform}/${parent.accountId} child=${target.platform}/${target.accountId})`
+        )
       );
     }
     applied[id] = parentId;
@@ -216,7 +237,12 @@ export function updateInReplyTo(updates: Array<{ id: string; inReplyTo: string }
     let cursor = startId;
     while (cursor && rowById[cursor]) {
       if (seen[cursor]) {
-        throw new Error(`inReplyTo が循環しています: ${startId} から到達`);
+        throw new Error(
+          t(
+            `inReplyTo が循環しています: ${startId} から到達`,
+            `inReplyTo forms a cycle: reached from ${startId}`
+          )
+        );
       }
       seen[cursor] = true;
       cursor = effectiveParent(cursor);
@@ -241,7 +267,12 @@ export function updatePostSchedule(
   updates: Array<{ id: string; postSchedule: string }>
 ): { updated: number } {
   if (!Array.isArray(updates) || updates.length === 0) {
-    throw new Error("updates must be a non-empty array of { id, postSchedule }.");
+    throw new Error(
+      t(
+        "updatesは{ id, postSchedule }の空でない配列である必要があります。",
+        "updates must be a non-empty array of { id, postSchedule }."
+      )
+    );
   }
   const { sheet } = ensureSheet(SHEETS.POSTS, HEADERS.POST_HEADERS);
   const map = indexMap(HEADERS.POST_HEADERS);
@@ -254,10 +285,15 @@ export function updatePostSchedule(
     const id = requireNonEmptyString(u?.id, "id");
     const target = rowById[id];
     if (!target) {
-      throw new Error(`Post not found in Posts: ${id}`);
+      throw new Error(t(`Postが見つかりません(Posts): ${id}`, `Post not found in Posts: ${id}`));
     }
     if (target.status !== "queued") {
-      throw new Error(`queued 以外は予約日時を変更できません: ${id} (status=${target.status})`);
+      throw new Error(
+        t(
+          `queued 以外は予約日時を変更できません: ${id} (status=${target.status})`,
+          `Only queued posts can have their schedule changed: ${id} (status=${target.status})`
+        )
+      );
     }
   });
 
@@ -282,15 +318,20 @@ export function updatePost(data: any): PostRow {
   const map = indexMap(HEADERS.POST_HEADERS);
   const target = readPostRows().find((r) => String(r.id) === id);
   if (!target) {
-    throw new Error(`Post not found in Posts: ${id}`);
+    throw new Error(t(`Postが見つかりません(Posts): ${id}`, `Post not found in Posts: ${id}`));
   }
   if (target.status !== "queued") {
-    throw new Error(`queued 以外は編集できません: ${id} (status=${target.status})`);
+    throw new Error(
+      t(
+        `queued 以外は編集できません: ${id} (status=${target.status})`,
+        `Only queued posts can be edited: ${id} (status=${target.status})`
+      )
+    );
   }
 
   if (data.contents !== undefined) {
     const contents = String(data.contents ?? "");
-    if (!contents) throw new Error("contents は空にできません。");
+    if (!contents) throw new Error(t("contents は空にできません。", "contents cannot be empty."));
     sheet.getRange(target.__row, map["contents"] + 1).setValue(contents);
   }
   if (data.mediaUrls !== undefined) {

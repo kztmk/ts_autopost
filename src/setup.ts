@@ -48,7 +48,9 @@ export function saveWebAppUrlOverride(rawUrl: string): { saved: boolean; url: st
   const url = String(rawUrl || "").trim();
   if (!WEB_APP_URL_PATTERN.test(url)) {
     throw new Error(
-      "正しいウェブアプリ URL（https://script.google.com/.../exec で終わるもの）を入力してください。"
+      getUiLang() === "en"
+        ? "Enter a valid Web App URL (one ending in https://script.google.com/.../exec)."
+        : "正しいウェブアプリ URL（https://script.google.com/.../exec で終わるもの）を入力してください。"
     );
   }
   PropertiesService.getScriptProperties().setProperty(WEB_APP_URL_OVERRIDE_PROP_KEY, url);

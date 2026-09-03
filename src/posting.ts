@@ -13,7 +13,7 @@ import {
 import { postToBluesky, getBlueskyReplyRef } from "./api/blueskyAuth";
 import { postToThreads, getThreadsRemainingQuota } from "./api/threadsAuth";
 import { deletePostingTriggers } from "./api/triggers";
-import { logErrorToSheet } from "./utils";
+import { logErrorToSheet, t } from "./utils";
 import { sendPostResultNotifications, PostNotification } from "./api/notifications";
 import { PostRow, Platform } from "./types";
 
@@ -82,10 +82,12 @@ function parseMediaUrls(raw: string): string[] {
   try {
     parsed = JSON.parse(s);
   } catch (e) {
-    throw new Error(`mediaUrls が不正な JSON です: ${s}`);
+    throw new Error(t(`mediaUrls が不正な JSON です: ${s}`, `mediaUrls is invalid JSON: ${s}`));
   }
   if (!Array.isArray(parsed)) {
-    throw new Error(`mediaUrls は JSON 配列である必要があります: ${s}`);
+    throw new Error(
+      t(`mediaUrls は JSON 配列である必要があります: ${s}`, `mediaUrls must be a JSON array: ${s}`)
+    );
   }
   return parsed.map((u) => String(u));
 }

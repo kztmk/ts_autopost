@@ -5,7 +5,7 @@
 import { readPostedRows, writePostedEngagement } from "./api/postData";
 import { getThreadsPostInsights, getThreadsAccountInsights } from "./api/threadsAuth";
 import { getBlueskyPostEngagement, getBlueskyAccountInsights } from "./api/blueskyAuth";
-import { logErrorToSheet } from "./utils";
+import { logErrorToSheet, t } from "./utils";
 import { Engagement, Platform } from "./types";
 
 // レート制限対策: 投稿ごとの待機と、GAS 実行時間制限を睨んだ時間予算
@@ -18,7 +18,7 @@ const ENGAGEMENT_CURSOR_PROP = "engagement_cursor";
 function getPostEngagement(platform: Platform, accountId: string, postId: string): Engagement {
   if (platform === "threads") return getThreadsPostInsights(accountId, postId);
   if (platform === "bluesky") return getBlueskyPostEngagement(postId);
-  throw new Error(`Unsupported platform: ${platform}`);
+  throw new Error(t(`未対応の platform です: ${platform}`, `Unsupported platform: ${platform}`));
 }
 
 /**
@@ -103,10 +103,10 @@ export function runEngagementUpdateOnce(): void {
 export function getAccountInsights(data: any): { platform: string; accountId: string; insights: { [key: string]: number } } {
   const platform = String(data?.platform || "") as Platform;
   const accountId = String(data?.accountId || "").trim();
-  if (!accountId) throw new Error("Missing required field: accountId.");
+  if (!accountId) throw new Error(t("必須項目がありません: accountId。", "Missing required field: accountId."));
   let insights: { [key: string]: number };
   if (platform === "threads") insights = getThreadsAccountInsights(accountId);
   else if (platform === "bluesky") insights = getBlueskyAccountInsights(accountId);
-  else throw new Error(`Invalid platform: ${platform}`);
+  else throw new Error(t(`不正な platform です: ${platform}`, `Invalid platform: ${platform}`));
   return { platform, accountId, insights };
 }

@@ -23,6 +23,24 @@ export function normalizeLang(value: any): "ja" | "en" {
   return "ja";
 }
 
+// リクエスト単位の表示言語（doPost/doGet の先頭で setRequestLang により設定する）。
+// GASは1リクエスト1実行でグローバル状態が別リクエストへ漏れないため、モジュール変数で良い。
+let requestLang: "ja" | "en" | null = null;
+
+/** doPost/doGet の先頭で、リクエストの lang クエリパラメータ（フロントの表示言語）を設定する。 */
+export function setRequestLang(value: any): void {
+  requestLang = value ? normalizeLang(value) : null;
+}
+
+/**
+ * リクエスト言語（setRequestLang）に応じてメッセージを選ぶ。API へ返す・throw する
+ * ユーザー向けメッセージはこれで日英を出し分ける。未設定（シートメニュー起点の実行など）
+ * のときは getUiLang()（Google アカウントのロケール）にフォールバックする。
+ */
+export function t(ja: string, en: string): string {
+  return (requestLang || getUiLang()) === "en" ? en : ja;
+}
+
 /**
  * Errors シートにエラーを記録する。シートが無ければ作成する。
  * （ScriptLock は取らない。GAS の ScriptLock は再入不可で、autoPost/sweep 実行中
@@ -79,7 +97,10 @@ export function fetchWithRetries(
     }
   }
   throw new Error(
-    `Request failed after ${retries} retries. Last response: ${response?.getContentText()}`
+    t(
+      `${retries}回のリトライ後もリクエストに失敗しました。最後のレスポンス: ${response?.getContentText()}`,
+      `Request failed after ${retries} retries. Last response: ${response?.getContentText()}`
+    )
   );
 }
 
@@ -121,7 +142,7 @@ export function newId(): string {
 /** 必須文字列を検証・正規化する。空なら例外（field 名をメッセージに含む） */
 export function requireNonEmptyString(value: any, field: string): string {
   const s = value === null || value === undefined ? "" : String(value).trim();
-  if (!s) throw new Error(`Missing required field: ${field}.`);
+  if (!s) throw new Error(t(`必須項目がありません: ${field}。`, `Missing required field: ${field}.`));
   return s;
 }
 

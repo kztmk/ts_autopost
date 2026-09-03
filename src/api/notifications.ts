@@ -4,7 +4,7 @@
 // - autoPost の 1 ラン分の結果をまとめて 1 通の Discord メッセージ（embed）で送る。
 // target=notificationSettings / action=upsert|test で操作する。
 
-import { fetchWithRetries } from "../utils";
+import { fetchWithRetries, t } from "../utils";
 import { Platform } from "../types";
 
 const NOTIFICATION_PROP_KEYS = {
@@ -88,7 +88,9 @@ export function upsertNotificationSettings(requestData: {
   if (typeof rawWebhookUrl === "string" && rawWebhookUrl.trim()) {
     const webhookUrl = rawWebhookUrl.trim();
     if (!DISCORD_WEBHOOK_URL_PATTERN.test(webhookUrl)) {
-      throw new Error("Discord Webhook URL の形式が正しくありません。");
+      throw new Error(
+        t("Discord Webhook URL の形式が正しくありません。", "The Discord webhook URL format is invalid.")
+      );
     }
     props.setProperty(NOTIFICATION_PROP_KEYS.discordWebhookUrl, webhookUrl);
   }
@@ -112,13 +114,17 @@ export function testNotification(requestData: { webhookUrl?: string }): {
   if (typeof raw === "string" && raw.trim()) {
     webhookUrl = raw.trim();
     if (!DISCORD_WEBHOOK_URL_PATTERN.test(webhookUrl)) {
-      throw new Error("Discord Webhook URL の形式が正しくありません。");
+      throw new Error(
+        t("Discord Webhook URL の形式が正しくありません。", "The Discord webhook URL format is invalid.")
+      );
     }
   } else {
     webhookUrl = getNotificationSettings().webhookUrl;
   }
   if (!webhookUrl) {
-    throw new Error("Discord Webhook URL が設定されていません。");
+    throw new Error(
+      t("Discord Webhook URL が設定されていません。", "The Discord webhook URL is not set.")
+    );
   }
 
   postToDiscord(webhookUrl, {
@@ -203,7 +209,10 @@ function postToDiscord(webhookUrl: string, payload: any): void {
   const code = response.getResponseCode();
   if (code < 200 || code >= 300) {
     throw new Error(
-      `Discord への送信に失敗しました（HTTP ${code}）: ${response.getContentText()}`
+      t(
+        `Discord への送信に失敗しました（HTTP ${code}）: ${response.getContentText()}`,
+        `Failed to send to Discord (HTTP ${code}): ${response.getContentText()}`
+      )
     );
   }
 }

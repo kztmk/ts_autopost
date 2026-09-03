@@ -4,7 +4,13 @@
 // （development-plan.md Phase 2 / トークン更新方針）。
 
 import { BlueskyAccount, Engagement } from "../types";
-import { maskSensitive, fetchWithRetries, requireNonEmptyString, filterImageUrls } from "../utils";
+import {
+  maskSensitive,
+  fetchWithRetries,
+  requireNonEmptyString,
+  filterImageUrls,
+  t,
+} from "../utils";
 
 // bsky.social はBlueskyが運営する既定のPDSだが、AT Protocolはハンドルごとに
 // 別のPDS（セルフホスト含む）へ所属できる。ハンドル解決はどのPDS/AppViewに投げても
@@ -25,7 +31,12 @@ function resolveHandleToDid(handle: string): string {
   );
   const data = JSON.parse(res.getContentText());
   if (!data.did) {
-    throw new Error(`ハンドルの解決に失敗しました (${handle}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `ハンドルの解決に失敗しました (${handle}): ${JSON.stringify(data)}`,
+        `Failed to resolve handle (${handle}): ${JSON.stringify(data)}`
+      )
+    );
   }
   return data.did;
 }
@@ -38,7 +49,7 @@ function resolveDidToPdsUrl(did: string): string {
   } else if (did.indexOf("did:web:") === 0) {
     docUrl = `https://${did.substring("did:web:".length)}/.well-known/did.json`;
   } else {
-    throw new Error(`未対応のDID形式です: ${did}`);
+    throw new Error(t(`未対応のDID形式です: ${did}`, `Unsupported DID format: ${did}`));
   }
   const res = fetchWithRetries(docUrl, { muteHttpExceptions: true });
   const doc = JSON.parse(res.getContentText());
@@ -47,7 +58,12 @@ function resolveDidToPdsUrl(did: string): string {
     (svc) => svc.id === "#atproto_pds" || svc.type === "AtprotoPersonalDataServer"
   );
   if (!pds || !pds.serviceEndpoint) {
-    throw new Error(`PDSの解決に失敗しました (did=${did}): ${JSON.stringify(doc)}`);
+    throw new Error(
+      t(
+        `PDSの解決に失敗しました (did=${did}): ${JSON.stringify(doc)}`,
+        `Failed to resolve PDS (did=${did}): ${JSON.stringify(doc)}`
+      )
+    );
   }
   return String(pds.serviceEndpoint).replace(/\/$/, "");
 }
@@ -69,7 +85,9 @@ function accountKey(accountId: string): string {
 function loadBlueskyAccount(accountId: string): BlueskyAccount {
   const raw = PropertiesService.getScriptProperties().getProperty(accountKey(accountId));
   if (!raw) {
-    throw new Error(`Bluesky account not found: ${accountId}`);
+    throw new Error(
+      t(`Bluesky アカウントが見つかりません: ${accountId}`, `Bluesky account not found: ${accountId}`)
+    );
   }
   return JSON.parse(raw) as BlueskyAccount;
 }
@@ -113,7 +131,12 @@ export function blueskyLogin(account: BlueskyAccount): BlueskyAccount {
   });
   const data = JSON.parse(res.getContentText());
   if (!data.accessJwt) {
-    throw new Error(`Bluesky ログインに失敗しました (${account.accountId}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Bluesky ログインに失敗しました (${account.accountId}): ${JSON.stringify(data)}`,
+        `Bluesky login failed (${account.accountId}): ${JSON.stringify(data)}`
+      )
+    );
   }
   account.pdsUrl = pdsUrl;
   account.did = data.did;
@@ -126,7 +149,7 @@ export function blueskyLogin(account: BlueskyAccount): BlueskyAccount {
 /** refreshSession。refreshJwt で accessJwt を更新する。失敗時は例外（呼び出し側で再ログイン） */
 function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
   if (!account.refreshJwt) {
-    throw new Error("No refreshJwt to refresh.");
+    throw new Error(t("更新用のrefreshJwtがありません。", "No refreshJwt to refresh."));
   }
   const res = fetchWithRetries(`${pdsBaseUrl(account)}/xrpc/com.atproto.server.refreshSession`, {
     method: "post",
@@ -135,7 +158,12 @@ function blueskyRefresh(account: BlueskyAccount): BlueskyAccount {
   });
   const data = JSON.parse(res.getContentText());
   if (!data.accessJwt) {
-    throw new Error(`Bluesky セッション更新に失敗しました (${account.accountId}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Bluesky セッション更新に失敗しました (${account.accountId}): ${JSON.stringify(data)}`,
+        `Failed to refresh Bluesky session (${account.accountId}): ${JSON.stringify(data)}`
+      )
+    );
   }
   account.accessJwt = data.accessJwt;
   account.refreshJwt = data.refreshJwt;
@@ -179,19 +207,30 @@ function isExpiredAuthResponse(res: GoogleAppsScript.URL_Fetch.HTTPResponse): bo
 function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
   const fetchRes = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
   if (fetchRes.getResponseCode() !== 200) {
-    throw new Error(`画像の取得に失敗 (HTTP ${fetchRes.getResponseCode()}): ${imageUrl}`);
+    throw new Error(
+      t(
+        `画像の取得に失敗 (HTTP ${fetchRes.getResponseCode()}): ${imageUrl}`,
+        `Failed to fetch image (HTTP ${fetchRes.getResponseCode()}): ${imageUrl}`
+      )
+    );
   }
   const blob = fetchRes.getBlob();
   const mime = (blob.getContentType() || "").toLowerCase();
   if (ALLOWED_IMAGE_MIME.indexOf(mime) === -1) {
     throw new Error(
-      `未対応の画像形式です (${mime || "unknown"}): ${imageUrl}。対応: ${ALLOWED_IMAGE_MIME.join("/")}`
+      t(
+        `未対応の画像形式です (${mime || "unknown"}): ${imageUrl}。対応: ${ALLOWED_IMAGE_MIME.join("/")}`,
+        `Unsupported image format (${mime || "unknown"}): ${imageUrl}. Supported: ${ALLOWED_IMAGE_MIME.join("/")}`
+      )
     );
   }
   const bytes = blob.getBytes();
   if (bytes.length > BLUESKY_MAX_BLOB_BYTES) {
     throw new Error(
-      `画像サイズが Bluesky の上限(${BLUESKY_MAX_BLOB_BYTES} bytes)を超えています (${bytes.length} bytes): ${imageUrl}`
+      t(
+        `画像サイズが Bluesky の上限(${BLUESKY_MAX_BLOB_BYTES} bytes)を超えています (${bytes.length} bytes): ${imageUrl}`,
+        `Image size exceeds Bluesky's limit (${BLUESKY_MAX_BLOB_BYTES} bytes) (${bytes.length} bytes): ${imageUrl}`
+      )
     );
   }
   const res = fetchWithRetries(`${pdsBaseUrl(account)}/xrpc/com.atproto.repo.uploadBlob`, {
@@ -206,7 +245,7 @@ function uploadBlueskyBlob(account: BlueskyAccount, imageUrl: string): any {
   }
   const data = JSON.parse(res.getContentText());
   if (!data.blob) {
-    throw new Error(`uploadBlob に失敗: ${JSON.stringify(data)}`);
+    throw new Error(t(`uploadBlob に失敗: ${JSON.stringify(data)}`, `uploadBlob failed: ${JSON.stringify(data)}`));
   }
   return data.blob;
 }
@@ -265,7 +304,10 @@ function doBlueskyPost(
   const data = JSON.parse(res.getContentText());
   if (!data.uri) {
     throw new Error(
-      `Bluesky 投稿に失敗しました (${account.accountId}): ${JSON.stringify(data)}`
+      t(
+        `Bluesky 投稿に失敗しました (${account.accountId}): ${JSON.stringify(data)}`,
+        `Bluesky post failed (${account.accountId}): ${JSON.stringify(data)}`
+      )
     );
   }
   return data.uri;
@@ -285,7 +327,12 @@ export function postToBluesky(
 ): string {
   const images = filterImageUrls(mediaUrls);
   if (images.length > BLUESKY_MAX_IMAGES) {
-    throw new Error(`Bluesky は画像 ${BLUESKY_MAX_IMAGES} 枚までです（${images.length} 枚指定）`);
+    throw new Error(
+      t(
+        `Bluesky は画像 ${BLUESKY_MAX_IMAGES} 枚までです（${images.length} 枚指定）`,
+        `Bluesky allows up to ${BLUESKY_MAX_IMAGES} images (${images.length} specified)`
+      )
+    );
   }
 
   let account = loadBlueskyAccount(accountId);
@@ -310,7 +357,7 @@ export function postToBluesky(
 /** at:// URI を {repo(did), collection, rkey} に分解する */
 function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
   const m = /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(String(uri));
-  if (!m) throw new Error(`不正な AT URI です: ${uri}`);
+  if (!m) throw new Error(t(`不正な AT URI です: ${uri}`, `Invalid AT URI: ${uri}`));
   return { repo: m[1], collection: m[2], rkey: m[3] };
 }
 
@@ -331,7 +378,12 @@ export function getBlueskyReplyRef(accountId: string, parentUri: string): Bluesk
   const res = fetchWithRetries(url, { muteHttpExceptions: true });
   const data = JSON.parse(res.getContentText());
   if (!data.uri || !data.cid) {
-    throw new Error(`親投稿(getRecord)の取得に失敗: ${parentUri}: ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `親投稿(getRecord)の取得に失敗: ${parentUri}: ${JSON.stringify(data)}`,
+        `Failed to fetch parent post (getRecord): ${parentUri}: ${JSON.stringify(data)}`
+      )
+    );
   }
   const parent = { uri: data.uri, cid: data.cid };
   // 親が既にリプライなら、そのスレッド root を継承。親が root ならそれ自身が root。
@@ -351,7 +403,9 @@ export function createBlueskyAuth(data: any) {
   const appPassword = requireNonEmptyString(data?.appPassword, "appPassword");
 
   if (PropertiesService.getScriptProperties().getProperty(accountKey(accountId))) {
-    throw new Error(`Bluesky account already exists: ${accountId}`);
+    throw new Error(
+      t(`Bluesky アカウントは既に存在します: ${accountId}`, `Bluesky account already exists: ${accountId}`)
+    );
   }
 
   const account: BlueskyAccount = {
@@ -425,7 +479,12 @@ export function getBlueskyPostEngagement(uri: string): Engagement {
   const data = JSON.parse(res.getContentText());
   const post = data.posts && data.posts[0];
   if (!post) {
-    throw new Error(`Bluesky 投稿の取得に失敗 (${uri}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Bluesky 投稿の取得に失敗 (${uri}): ${JSON.stringify(data)}`,
+        `Failed to fetch Bluesky post (${uri}): ${JSON.stringify(data)}`
+      )
+    );
   }
   return {
     views: 0,
@@ -447,7 +506,12 @@ export function getBlueskyAccountInsights(accountId: string): { [key: string]: n
   );
   const data = JSON.parse(res.getContentText());
   if (!data.did) {
-    throw new Error(`Bluesky プロフィール取得に失敗 (${actor}): ${JSON.stringify(data)}`);
+    throw new Error(
+      t(
+        `Bluesky プロフィール取得に失敗 (${actor}): ${JSON.stringify(data)}`,
+        `Failed to fetch Bluesky profile (${actor}): ${JSON.stringify(data)}`
+      )
+    );
   }
   return {
     followers_count: data.followersCount || 0,

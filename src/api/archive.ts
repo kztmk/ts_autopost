@@ -3,6 +3,7 @@
 // 元シートは削除する（次回アクセス時に ensureSheet がヘッダー付きで再作成する）。
 
 import { SHEETS } from "../constants";
+import { t } from "../utils";
 
 const ARCHIVE_FILE_NAME = "Aqila_Archive";
 const ARCHIVE_FILE_ID_PROP = "archive_spreadsheet_id"; // 作成したファイル ID を記憶する
@@ -41,35 +42,62 @@ function getOrCreateArchiveSpreadsheet(): {
 export function archiveSheet(source: string, filename: string) {
   const sourceName = String(source || "").trim();
   if (ARCHIVABLE_SHEETS.indexOf(sourceName) === -1) {
-    throw new Error(`Invalid source. Must be one of: ${ARCHIVABLE_SHEETS.join(", ")}.`);
+    throw new Error(
+      t(
+        `不正な source です。次のいずれかにしてください: ${ARCHIVABLE_SHEETS.join(", ")}。`,
+        `Invalid source. Must be one of: ${ARCHIVABLE_SHEETS.join(", ")}.`
+      )
+    );
   }
   const newSheetName = String(filename || "").trim();
   if (!newSheetName) {
-    throw new Error("Missing required field: filename.");
+    throw new Error(t("必須項目がありません: filename。", "Missing required field: filename."));
   }
   if (newSheetName.length > MAX_SHEET_NAME_LENGTH) {
-    throw new Error(`filename が長すぎます（${MAX_SHEET_NAME_LENGTH} 文字以内）: ${newSheetName}`);
+    throw new Error(
+      t(
+        `filename が長すぎます（${MAX_SHEET_NAME_LENGTH} 文字以内）: ${newSheetName}`,
+        `filename is too long (must be within ${MAX_SHEET_NAME_LENGTH} characters): ${newSheetName}`
+      )
+    );
   }
   if (INVALID_SHEET_NAME_CHARS.test(newSheetName)) {
-    throw new Error(`filename に使えない文字が含まれています（: \\ / ? * [ ] は不可）: ${newSheetName}`);
+    throw new Error(
+      t(
+        `filename に使えない文字が含まれています（: \\ / ? * [ ] は不可）: ${newSheetName}`,
+        `filename contains invalid characters (: \\ / ? * [ ] are not allowed): ${newSheetName}`
+      )
+    );
   }
 
   // autoPost / updateAllEngagement と同じ ScriptLock を取り、コピー〜元シート削除の間に
   // Posted への投稿追記・エンゲージメント更新が発生して取りこぼされるのを防ぐ。
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) {
-    throw new Error("アーカイブ処理のロックを取得できませんでした。しばらく後に再試行してください。");
+    throw new Error(
+      t(
+        "アーカイブ処理のロックを取得できませんでした。しばらく後に再試行してください。",
+        "Could not acquire the archive processing lock. Please try again shortly."
+      )
+    );
   }
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sourceSheet = ss.getSheetByName(sourceName);
     if (!sourceSheet) {
-      throw new Error(`Source sheet "${sourceName}" not found.`);
+      throw new Error(
+        t(`元シート "${sourceName}" が見つかりません。`, `Source sheet "${sourceName}" not found.`)
+      );
     }
 
     const { ss: archiveSs, isNew } = getOrCreateArchiveSpreadsheet();
     if (archiveSs.getSheetByName(newSheetName)) {
-      throw new Error(`アーカイブ先に同名シートが既にあります: ${newSheetName}`);
+      throw new Error(
+        t(
+          `アーカイブ先に同名シートが既にあります: ${newSheetName}`,
+          `A sheet with the same name already exists in the archive: ${newSheetName}`
+        )
+      );
     }
 
     const copied = sourceSheet.copyTo(archiveSs);

@@ -52,7 +52,7 @@ import {
   upsertNotificationSettings,
   testNotification,
 } from "./api/notifications";
-import { getUiLang } from "./utils";
+import { getUiLang, setRequestLang, t } from "./utils";
 import { VERSION } from "./constants";
 
 /**
@@ -226,6 +226,7 @@ export function setup_resetProxyAuth(): void {
 export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
   const action = e?.parameter?.action || "";
   const target = e?.parameter?.target || "";
+  setRequestLang(e?.parameter?.lang);
 
   try {
     let requestData: any = {};
@@ -236,7 +237,12 @@ export function doPost(e: any): GoogleAppsScript.Content.TextOutput {
     ) {
       requestData = JSON.parse(e.postData.contents);
     } else if (e?.postData && e.postData.contents) {
-      throw new Error("Invalid request body format. Expected application/json.");
+      throw new Error(
+        t(
+          "リクエスト本文の形式が不正です。application/json を想定しています。",
+          "Invalid request body format. Expected application/json."
+        )
+      );
     }
 
     // security.initialize は唯一の無認証 POST（初回接続時に setup code で紐付け）。
@@ -367,6 +373,7 @@ export function doGet(
 ): GoogleAppsScript.Content.TextOutput | GoogleAppsScript.HTML.HtmlOutput {
   const action = e?.parameter?.action || "";
   const target = e?.parameter?.target || "";
+  setRequestLang(e?.parameter?.lang);
 
   try {
     // security.status は唯一の無認証 GET（疎通確認・初期化状態の確認）。

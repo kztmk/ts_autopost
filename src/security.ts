@@ -8,6 +8,8 @@
 // は変更しないこと（変更すると Functions 側と検証不一致になる）。
 // プロパティキー・シート名は内部保存用でありワイヤー契約ではない。
 
+import { t } from "./utils";
+
 const SECURITY_PROP_KEYS = {
   ownerUid: "security_ownerUid",
   proxySecret: "security_proxySecret",
@@ -92,7 +94,7 @@ export function getSecurityStatus() {
 
 export function initializeProxyAuth(requestData: InitializeRequest) {
   if (!requestData || typeof requestData !== "object") {
-    throw new Error("Invalid initialize request body.");
+    throw new Error(t("初期化リクエストの本文が不正です。", "Invalid initialize request body."));
   }
 
   const uid = normalizeRequiredString(requestData.uid, "uid");
@@ -104,7 +106,12 @@ export function initializeProxyAuth(requestData: InitializeRequest) {
   // （異なる proxySecret を返して片方が無効化される競合を防ぐ）。
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
-    throw new Error("初期化のロックを取得できませんでした。しばらく後に再試行してください。");
+    throw new Error(
+      t(
+        "初期化のロックを取得できませんでした。しばらく後に再試行してください。",
+        "Could not acquire the initialization lock. Please try again shortly."
+      )
+    );
   }
   try {
     return initializeProxyAuthLocked(uid, setupCode, properties);
@@ -133,21 +140,31 @@ function initializeProxyAuthLocked(
 
   if (!expectedHash || !expiresAt) {
     throw new Error(
-      "Setup code has not been generated. Generate a new setup code from the Spreadsheet menu, then save it in the app before it expires."
+      t(
+        "本人確認コードが生成されていません。スプレッドシートのメニューから新しいコードを生成し、有効期限内にアプリへ保存してください。",
+        "Setup code has not been generated. Generate a new setup code from the Spreadsheet menu, then save it in the app before it expires."
+      )
     );
   }
 
   if (Date.now() > expiresAt) {
     clearSetupCode(properties);
-    throw new Error("Setup code has expired. Generate a new setup code.");
+    throw new Error(
+      t("本人確認コードの有効期限が切れています。新しいコードを生成してください。", "Setup code has expired. Generate a new setup code.")
+    );
   }
 
   if (sha256Base64(setupCode) !== expectedHash) {
-    throw new Error("Invalid setup code.");
+    throw new Error(t("本人確認コードが正しくありません。", "Invalid setup code."));
   }
 
   if (existingOwnerUid && existingOwnerUid !== uid) {
-    throw new Error("このシートは他の方が登録されており使用できません。");
+    throw new Error(
+      t(
+        "このシートは他の方が登録されており使用できません。",
+        "This sheet is already registered to a different account and cannot be used."
+      )
+    );
   }
 
   const proxySecret = createProxySecret(uid, expectedHash);
@@ -317,7 +334,7 @@ export function assertProxyAuthorized(
   const proxySecret = allProps[SECURITY_PROP_KEYS.proxySecret];
 
   if (!ownerUid || !proxySecret) {
-    throw new Error("Proxy authorization is not initialized.");
+    throw new Error(t("Proxy認可が初期化されていません。", "Proxy authorization is not initialized."));
   }
 
   const authPayload = getAuthPayload(e, requestData, method);
@@ -333,15 +350,22 @@ export function assertProxyAuthorized(
   const timestamp = Number(timestampRaw);
 
   if (uid !== ownerUid) {
-    throw new Error("このシートは他の方が登録されており使用できません。");
+    throw new Error(
+      t(
+        "このシートは他の方が登録されており使用できません。",
+        "This sheet is already registered to a different account and cannot be used."
+      )
+    );
   }
 
   if (!Number.isFinite(timestamp)) {
-    throw new Error("Invalid _auth.timestamp.");
+    throw new Error(t("_auth.timestamp が不正です。", "Invalid _auth.timestamp."));
   }
 
   if (Math.abs(Date.now() - timestamp) > REQUEST_TOLERANCE_MS) {
-    throw new Error("Request timestamp is outside the allowed window.");
+    throw new Error(
+      t("リクエストのタイムスタンプが許容範囲外です。", "Request timestamp is outside the allowed window.")
+    );
   }
 
   const requestId = authPayload.requestId
@@ -375,7 +399,7 @@ export function assertProxyAuthorized(
       receivedSigPrefix: signature.slice(0, 6),
       expectedSigPrefix: expectedSignature.slice(0, 6),
     });
-    throw new Error("Invalid request signature.");
+    throw new Error(t("リクエスト署名が不正です。", "Invalid request signature."));
   }
 }
 
@@ -530,7 +554,7 @@ function assertNotReplay(requestId: string): void {
   const locked = lock.tryLock(5000);
   try {
     if (cache.get(cacheKey)) {
-      throw new Error("Duplicate request detected.");
+      throw new Error(t("重複したリクエストを検出しました。", "Duplicate request detected."));
     }
     cache.put(cacheKey, "1", REPLAY_CACHE_TTL_SECONDS);
   } finally {
@@ -575,12 +599,16 @@ function sha256Base64(value: string): string {
 
 function normalizeRequiredString(value: any, fieldName: string): string {
   if (value === null || value === undefined) {
-    throw new Error(`Missing required field: ${fieldName}.`);
+    throw new Error(
+      t(`必須項目がありません: ${fieldName}。`, `Missing required field: ${fieldName}.`)
+    );
   }
 
   const normalized = String(value).trim();
   if (!normalized) {
-    throw new Error(`Missing required field: ${fieldName}.`);
+    throw new Error(
+      t(`必須項目がありません: ${fieldName}。`, `Missing required field: ${fieldName}.`)
+    );
   }
   return normalized;
 }

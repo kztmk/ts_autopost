@@ -36,6 +36,12 @@ export interface BlueskyAccount extends PlatformAccountBase {
   did?: string;
   accessJwt?: string;
   refreshJwt?: string;
+  /**
+   * このアカウントが実際に所属する PDS のベースURL（例: https://bsky.social、
+   * またはセルフホストPDSの独自ドメイン）。ハンドルから解決して保存する。
+   * 未設定（旧データ）の場合は bsky.social にフォールバックする。
+   */
+  pdsUrl?: string;
 }
 
 export type PlatformAccount = ThreadsAccount | BlueskyAccount;

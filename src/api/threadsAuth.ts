@@ -21,6 +21,7 @@ import {
   normalizeLang,
   t,
 } from "../utils";
+import { getWebAppUrlOverride } from "../setup";
 
 /**
  * OAuth コールバック（無認証・ブラウザ直アクセス）の表示文言（日英）。
@@ -231,7 +232,18 @@ export function deleteThreadsAuth(data: any) {
 // ---- 認可フロー ----
 
 /** この Web アプリ自身の /exec URL（= Meta に登録するリダイレクト URI） */
+/**
+ * この Web アプリ自身の /exec URL（= Meta に登録するリダイレクト URI）。
+ * ScriptApp.getService().getUrl() は複数デプロイがあると実際と異なる URL を返す
+ * ことがある（Bluesky の GAS URL 設定で判明した既知の問題）ため、まず
+ * setup.ts で手動保存された URL（プロフィール画面の GAS 連携で使うものと同じ値）を
+ * 優先し、未保存の場合のみ自動取得にフォールバックする。手動保存された値を使えば、
+ * ここで返す値は常に安定し、Meta 側に一度登録すれば以後もズレない。
+ */
 function getRedirectUri(): string {
+  const override = getWebAppUrlOverride();
+  if (override) return override;
+
   const url = ScriptApp.getService().getUrl();
   if (!url) {
     throw new Error(
